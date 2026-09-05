@@ -282,10 +282,12 @@ The only retry inside a tick follows a 429. Every other failure waits for the ne
 
 Waiting out slow mode is safe precisely because of the rule that governs everything else here: Telegram's error envelope proves the message was not posted. A rate limit is the one refusal that is expected to succeed on a second attempt, so it is the one worth repeating immediately.
 
+The commit is stamped in at compile time by `build.rs`, which shells out to `git`. A build made from a dirty tree is labelled `-dirty`, because a deployment that matches no commit should say so rather than quietly claim its parent.
+
 Cloudflare assigns a `workers.dev` URL whether or not the Worker wants one, and a Worker with no `fetch` handler answers it with a bare "Worker threw exception" page. The bot answers with a fixed description of itself instead. That is presentation, not an API: the handler takes no input, reads no binding, and has nothing to authenticate.
 
 !control select http-surface
-= Fixed status text — turns the URL Cloudflare hands out anyway into something that explains the service, while reading nothing and accepting nothing
+= Fixed status text — turns the URL Cloudflare hands out anyway into something that explains the service, while reading nothing and accepting nothing; it also names the commit it was built from, which is the one question a deployed service should always be able to answer about itself
 - No `fetch` handler at all — the smallest possible surface, but every visit renders a Cloudflare error page that reads like a broken deployment
 - Live status read from KV — would show which destinations are current and how far each has got, but the records are keyed by chat id and the URL is public, so it would publish exactly what `target-configuration` moved into a secret
 - Redirect to the repository — one line and always accurate, but it tells a visitor nothing about whether this deployment is the one doing the posting

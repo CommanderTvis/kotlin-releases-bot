@@ -530,6 +530,8 @@ mod glue {
     // destinations, and this page must not leak them.
     #[event(fetch)]
     pub async fn fetch(_req: Request, _env: Env, _ctx: Context) -> Result<Response> {
+        // Stamped by build.rs at compile time.
+        let commit = env!("GIT_COMMIT");
         Response::ok(format!(
             "kotlin-releases-bot\n\n\
              Announces Kotlin releases and blog posts to Telegram.\n\n\
@@ -539,7 +541,8 @@ mod glue {
              \x20         every post\n\n\
              Each feed has its own destination list and its own records.\n\
              schedule  every 15 minutes\n\
-             code      https://github.com/CommanderTvis/kotlin-releases-bot\n\n\
+             commit    {commit}\n\
+             code      https://github.com/CommanderTvis/kotlin-releases-bot/commit/{commit}\n\n\
              There is no API here. The bot runs on a cron trigger and only sends.\n"
         ))
         .map(|mut response| {
