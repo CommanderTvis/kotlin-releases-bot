@@ -10,4 +10,4 @@ crons = ["*/15 * * * *"]
 
 [[kv_namespaces]]
 binding = "SEEN"
-id = "replace-with-your-namespace-id"
+id = "68ecab8aca0b4090a3a2e609ca690411"
