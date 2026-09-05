@@ -59,7 +59,7 @@ Every destination receives the same message text. There is no per-destination fi
 
 ## Shape of the system
 
-One Worker, one scheduled handler, one KV namespace, no HTTP surface. The Worker has four pure functions (parse the feed, filter entries, format a message, parse the target list) and one impure orchestration around them (fetch, read KV, send, write KV).
+One Worker, one scheduled handler, one KV namespace, and an HTTP handler that only describes the bot. The Worker has four pure functions (parse the feed, filter entries, format a message, parse the target list) and one impure orchestration around them (fetch, read KV, send, write KV).
 
 The orchestration reaches the outside world through two small traits, one for the seen record and one for sending a message. The Worker implements them over KV and `fetch`; the tests implement them over an in-memory map and a script of outcomes. That indirection exists for one reason: the claim-before-send ordering is the whole duplicate guarantee, and it has to be assertable in a test.
 
@@ -256,7 +256,13 @@ Adding a destination seeds it silently instead of backfilling. A new chat wants 
 
 There is no retry inside a tick. The next scheduled tick is the only retry, and a release stays in the feed for hours, so waiting costs nothing.
 
-The bot has no HTTP handler. Nothing needs to reach it, which also means there is no attack surface to authenticate.
+Cloudflare assigns a `workers.dev` URL whether or not the Worker wants one, and a Worker with no `fetch` handler answers it with a bare "Worker threw exception" page. The bot answers with a fixed description of itself instead. That is presentation, not an API: the handler takes no input, reads no binding, and has nothing to authenticate.
+
+!control select http-surface
+= Fixed status text — turns the URL Cloudflare hands out anyway into something that explains the service, while reading nothing and accepting nothing
+- No `fetch` handler at all — the smallest possible surface, but every visit renders a Cloudflare error page that reads like a broken deployment
+- Live status read from KV — would show which destinations are current and how far each has got, but the records are keyed by chat id and the URL is public, so it would publish exactly what `target-configuration` moved into a secret
+- Redirect to the repository — one line and always accurate, but it tells a visitor nothing about whether this deployment is the one doing the posting
 
 ## Invariants
 
@@ -272,6 +278,7 @@ The bot has no HTTP handler. Nothing needs to reach it, which also means there i
 - No build tag or beta is ever sent while `release-kinds` excludes them.
 - All destinations receive identical message text for a given release.
 - The bot token and the destination list exist only as Worker secrets, never in the repository, the logs, or the messages.
+- The HTTP handler reads no binding, so no destination can be discovered from the public URL.
 - The feed is fetched exactly once per tick regardless of how many destinations are configured.
 - Message text sent to Telegram is HTML-escaped before interpolation.
 - The parser and the `TARGETS` parser are tested against real inputs, and a change in GitHub's feed shape fails a test rather than silently posting nothing.
@@ -281,6 +288,7 @@ The bot has no HTTP handler. Nothing needs to reach it, which also means there i
 ## Out of scope
 
 - Any Telegram commands, subscriptions, or replies. The bot only sends.
+- Any HTTP endpoint that does something. The one handler returns fixed text and takes no input.
 - Per-destination filtering, formatting, or scheduling. All destinations receive the same set of announcements.
 - Automatic removal of destinations that reject the bot. The operator edits `TARGETS`.
 - Automatic recovery of a release skipped by an unknown send outcome. The log names it, the operator edits the record.

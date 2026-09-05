@@ -363,6 +363,27 @@ mod glue {
         run(&feed, &targets, &kv, &Telegram { token }).await
     }
 
+    // The workers.dev URL is public and always assigned, so it answers with a
+    // fixed description. It reads no binding: the KV keys are named after the
+    // destinations, and this page must not leak them.
+    #[event(fetch)]
+    pub async fn fetch(_req: Request, _env: Env, _ctx: Context) -> Result<Response> {
+        Response::ok(format!(
+            "kotlin-releases-bot\n\n\
+             Announces new Kotlin releases and release candidates to Telegram.\n\n\
+             feed      {FEED_URL}\n\
+             keeps     vX.Y.Z and vX.Y.Z-RCn\n\
+             drops     betas and build-*-dev-* tags\n\
+             schedule  every 15 minutes\n\
+             code      https://github.com/CommanderTvis/kotlin-releases-bot\n\n\
+             There is no API here. The bot runs on a cron trigger and only sends.\n"
+        ))
+        .map(|mut response| {
+            let _ = response.headers_mut().set("content-type", "text/plain; charset=utf-8");
+            response
+        })
+    }
+
     // Returns unit and must never panic: workers-rs exposes no no_retry, so a
     // failed tick would be replayed. The claim-before-send ordering makes that
     // replay harmless, and returning normally means it is never requested.
