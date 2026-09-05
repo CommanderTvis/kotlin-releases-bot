@@ -1,4 +1,7 @@
-//! Announces new Kotlin releases to a list of Telegram destinations.
+//! Announces new Kotlin releases and blog posts to Telegram destinations.
+//!
+//! Two feeds, each with its own destination list and its own delivery records:
+//! the GitHub releases Atom feed and the Kotlin blog's RSS feed.
 //!
 //! Everything above the `wasm32` block is pure and compiles natively, which is
 //! what `cargo test` exercises. The Worker glue below implements the two traits
@@ -9,7 +12,8 @@
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
-pub const FEED_URL: &str = "https://github.com/JetBrains/kotlin/releases.atom";
+pub const RELEASES_URL: &str = "https://github.com/JetBrains/kotlin/releases.atom";
+pub const BLOG_URL: &str = "https://blog.jetbrains.com/kotlin/feed/";
 
 /// The feed only ever shows the last ten releases, so nothing older can return.
 const SEEN_CAP: usize = 50;
@@ -20,11 +24,30 @@ const SEEN_CAP: usize = 50;
 /// Anything longer is left for the next tick.
 const MAX_RETRY_WAIT: u64 = 60;
 
+/// One thing worth announcing. `id` is whatever the feed uses to identify it
+/// for good: a release tag, or a blog post's `<guid>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Release {
-    pub tag: String,
+pub struct Entry {
+    pub id: String,
     pub title: String,
     pub link: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feed {
+    Releases,
+    Blog,
+}
+
+impl Feed {
+    /// Each feed keeps its own records, so the two never collide and a
+    /// destination can subscribe to one without the other.
+    pub fn key_prefix(self) -> &'static str {
+        match self {
+            Feed::Releases => "seen:release",
+            Feed::Blog => "seen:blog",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,10 +82,28 @@ pub trait Sender {
     async fn wait(&self, seconds: u64);
 }
 
-pub fn parse_feed(xml: &str) -> Vec<Release> {
+/// Resolves one `&...;` reference to its text.
+fn entity(reference: quick_xml::events::BytesRef) -> String {
+    if let Ok(Some(c)) = reference.resolve_char_ref() {
+        return c.to_string();
+    }
+    match reference.into_inner().as_ref() {
+        "amp" => "&",
+        "lt" => "<",
+        "gt" => ">",
+        "quot" => "\"",
+        "apos" => "'",
+        _ => "",
+    }
+    .to_string()
+}
+
+/// GitHub's releases feed: Atom `<entry>`, link as an attribute, id taken from
+/// the last path segment of that link.
+pub fn parse_atom(xml: &str) -> Vec<Entry> {
     let mut reader = Reader::from_str(xml);
 
-    let mut releases = Vec::new();
+    let mut entries = Vec::new();
     let mut in_entry = false;
     let mut in_title = false;
     let mut link: Option<String> = None;
@@ -91,25 +132,15 @@ pub fn parse_feed(xml: &str) -> Vec<Release> {
             },
             Ok(Event::Text(t)) if in_title => title.push_str(&t.xml10_content()),
             // `&amp;` and friends arrive as their own event, not as text.
-            Ok(Event::GeneralRef(r)) if in_title => match r.resolve_char_ref() {
-                Ok(Some(c)) => title.push(c),
-                _ => title.push_str(match r.into_inner().as_ref() {
-                    "amp" => "&",
-                    "lt" => "<",
-                    "gt" => ">",
-                    "quot" => "\"",
-                    "apos" => "'",
-                    _ => "",
-                }),
-            },
+            Ok(Event::GeneralRef(r)) if in_title => title.push_str(&entity(r)),
             Ok(Event::End(e)) => match e.name().as_ref() {
                 "title" => in_title = false,
                 "entry" => {
                     if let Some(link) = link.take() {
                         let title = title.trim();
                         if !title.is_empty() {
-                            releases.push(Release {
-                                tag: link.rsplit('/').next().unwrap_or_default().to_string(),
+                            entries.push(Entry {
+                                id: link.rsplit('/').next().unwrap_or_default().to_string(),
                                 title: title.to_string(),
                                 link,
                             });
@@ -122,7 +153,82 @@ pub fn parse_feed(xml: &str) -> Vec<Release> {
             _ => {}
         }
     }
-    releases
+    entries
+}
+
+/// The blog feed: RSS `<item>`, link as element text, id taken from `<guid>`,
+/// which WordPress keeps stable even when a post is renamed or its URL changes.
+/// Post bodies arrive as CDATA, so their markup can never be mistaken for feed
+/// structure.
+pub fn parse_rss(xml: &str) -> Vec<Entry> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Field {
+        Title,
+        Link,
+        Guid,
+    }
+
+    fn append(field: Option<Field>, text: &str, title: &mut String, link: &mut String, guid: &mut String) {
+        match field {
+            Some(Field::Title) => title.push_str(text),
+            Some(Field::Link) => link.push_str(text),
+            Some(Field::Guid) => guid.push_str(text),
+            None => {}
+        }
+    }
+
+    let mut reader = Reader::from_str(xml);
+    let mut entries = Vec::new();
+    let mut in_item = false;
+    // Only set for the three fields collected, so a post body or a
+    // channel-level element can never leak into an entry.
+    let mut field: Option<Field> = None;
+    let (mut title, mut link, mut guid) = (String::new(), String::new(), String::new());
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Start(e)) => match e.name().as_ref() {
+                "item" => {
+                    in_item = true;
+                    title.clear();
+                    link.clear();
+                    guid.clear();
+                }
+                "title" if in_item => field = Some(Field::Title),
+                "link" if in_item => field = Some(Field::Link),
+                "guid" if in_item => field = Some(Field::Guid),
+                _ => {}
+            },
+            Ok(Event::Text(t)) => {
+                append(field, &t.xml10_content(), &mut title, &mut link, &mut guid)
+            }
+            Ok(Event::CData(c)) => {
+                append(field, &c.into_inner(), &mut title, &mut link, &mut guid)
+            }
+            Ok(Event::GeneralRef(r)) => {
+                append(field, &entity(r), &mut title, &mut link, &mut guid)
+            }
+            Ok(Event::End(e)) => match e.name().as_ref() {
+                "title" | "link" | "guid" => field = None,
+                "item" => {
+                    let (t, l) = (title.trim(), link.trim());
+                    if !t.is_empty() && !l.is_empty() {
+                        let id = if guid.trim().is_empty() { l } else { guid.trim() };
+                        entries.push(Entry {
+                            id: id.to_string(),
+                            title: t.to_string(),
+                            link: l.to_string(),
+                        });
+                    }
+                    in_item = false;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    entries
 }
 
 /// Finals (`v2.4.10`) and release candidates (`v2.4.20-RC`, `v2.4.20-RC3`).
@@ -145,16 +251,16 @@ fn escape_html(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-pub fn format_message(release: &Release) -> String {
-    let kind = if release.tag.contains("-RC") {
-        "Kotlin release candidate"
-    } else {
-        "Kotlin release"
+pub fn format_message(feed: Feed, entry: &Entry) -> String {
+    let kind = match feed {
+        Feed::Releases if entry.id.contains("-RC") => "Kotlin release candidate",
+        Feed::Releases => "Kotlin release",
+        Feed::Blog => "Kotlin blog",
     };
     format!(
         "<b>{kind}</b>\n<a href=\"{}\">{}</a>",
-        escape_html(&release.link),
-        escape_html(&release.title)
+        escape_html(&entry.link),
+        escape_html(&entry.title)
     )
 }
 
@@ -205,22 +311,24 @@ pub fn classify(status: u16, body: &str) -> Outcome {
 
 /// Walks every destination and returns the lines worth logging.
 pub async fn run<S: Store, T: Sender>(
+    feed: Feed,
     feed_xml: &str,
     targets: &[Target],
     store: &S,
     sender: &T,
 ) -> Vec<String> {
     let mut logs = Vec::new();
-    let releases: Vec<Release> = parse_feed(feed_xml)
-        .into_iter()
-        .filter(|r| is_release(&r.tag))
-        .collect();
-    if releases.is_empty() {
+    let entries: Vec<Entry> = match feed {
+        // Only the releases feed is filtered; every blog post is worth sending.
+        Feed::Releases => parse_atom(feed_xml).into_iter().filter(|e| is_release(&e.id)).collect(),
+        Feed::Blog => parse_rss(feed_xml),
+    };
+    if entries.is_empty() {
         return logs;
     }
 
     for target in targets {
-        let key = format!("seen:{}", target.key);
+        let key = format!("{}:{}", feed.key_prefix(), target.key);
         let seen = match store.get(&key).await {
             Ok(seen) => seen,
             Err(e) => {
@@ -232,7 +340,7 @@ pub async fn run<S: Store, T: Sender>(
         // A destination the bot has never sent to is seeded silently, so neither
         // a fresh deploy nor a newly added chat replays the whole feed.
         let Some(seen) = seen else {
-            let tags: Vec<String> = releases.iter().map(|r| r.tag.clone()).collect();
+            let tags: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
             if let Err(e) = store.put(&key, &tags).await {
                 logs.push(format!("target {}: seeding failed: {e}", target.key));
             }
@@ -240,22 +348,22 @@ pub async fn run<S: Store, T: Sender>(
         };
 
         let mut record = seen.clone();
-        let fresh: Vec<&Release> = releases.iter().filter(|r| !seen.contains(&r.tag)).rev().collect();
+        let fresh: Vec<&Entry> = entries.iter().filter(|e| !seen.contains(&e.id)).rev().collect();
 
-        for release in fresh {
+        for entry in fresh {
             // Claim first: a crash, an eviction or a lost acknowledgement after
             // this point costs one missed release, never a duplicate.
-            record.push(release.tag.clone());
+            record.push(entry.id.clone());
             if record.len() > SEEN_CAP {
                 record.drain(..record.len() - SEEN_CAP);
             }
             if let Err(e) = store.put(&key, &record).await {
                 // Nothing was claimed, so nothing may be sent.
-                logs.push(format!("target {}: {} not claimed: {e}", target.key, release.tag));
+                logs.push(format!("target {}: {} not claimed: {e}", target.key, entry.id));
                 break;
             }
 
-            let text = format_message(release);
+            let text = format_message(feed, entry);
             let mut outcome = sender.send(target, &text).await;
 
             // Slow mode is permanent in some groups, so a rate limit is the
@@ -266,7 +374,7 @@ pub async fn run<S: Store, T: Sender>(
                 if seconds <= MAX_RETRY_WAIT {
                     logs.push(format!(
                         "target {}: rate limited, waiting {seconds}s for {}",
-                        target.key, release.tag
+                        target.key, entry.id
                     ));
                     sender.wait(seconds).await;
                     outcome = sender.send(target, &text).await;
@@ -281,11 +389,11 @@ pub async fn run<S: Store, T: Sender>(
                     match store.put(&key, &record).await {
                         Ok(()) => logs.push(format!(
                             "target {}: {} rejected, will retry next tick",
-                            target.key, release.tag
+                            target.key, entry.id
                         )),
                         Err(e) => logs.push(format!(
                             "target {}: {} rejected but the claim is stuck: {e}",
-                            target.key, release.tag
+                            target.key, entry.id
                         )),
                     }
                     break;
@@ -293,7 +401,7 @@ pub async fn run<S: Store, T: Sender>(
                 Outcome::Unknown => {
                     logs.push(format!(
                         "target {}: {} delivery unknown, SKIPPED to avoid a duplicate",
-                        target.key, release.tag
+                        target.key, entry.id
                     ));
                     break;
                 }
@@ -373,10 +481,10 @@ mod glue {
         Fetch::Request(request).send().await
     }
 
-    async fn fetch_feed() -> Result<String> {
+    async fn fetch_feed(url: &str) -> Result<String> {
         let headers = Headers::new();
         headers.set("user-agent", "kotlin-releases-bot")?;
-        let request = Request::new_with_init(FEED_URL, RequestInit::new().with_headers(headers))?;
+        let request = Request::new_with_init(url, RequestInit::new().with_headers(headers))?;
         let mut response = Fetch::Request(request).send().await?;
         if !(200..300).contains(&response.status_code()) {
             return Err(Error::RustError(format!("feed {}", response.status_code())));
@@ -389,19 +497,32 @@ mod glue {
             Ok(token) => token.to_string(),
             Err(e) => return vec![format!("BOT_TOKEN unavailable: {e}")],
         };
-        let targets = match env.var("TARGETS") {
-            Ok(targets) => parse_targets(&targets.to_string()),
-            Err(e) => return vec![format!("TARGETS unavailable: {e}")],
-        };
         let kv = match env.kv("SEEN") {
             Ok(kv) => Kv(kv),
             Err(e) => return vec![format!("SEEN binding unavailable: {e}")],
         };
-        let feed = match fetch_feed().await {
-            Ok(feed) => feed,
-            Err(e) => return vec![format!("feed unreadable: {e}")],
-        };
-        run(&feed, &targets, &kv, &Telegram { token }).await
+        let sender = Telegram { token };
+        let mut logs = Vec::new();
+
+        for (feed, url, var) in [
+            (Feed::Releases, RELEASES_URL, "TARGETS"),
+            (Feed::Blog, BLOG_URL, "BLOG_TARGETS"),
+        ] {
+            // An unset or empty list means that feed is simply not subscribed
+            // to, which is not worth a log line on every tick.
+            let targets = match env.var(var) {
+                Ok(raw) => parse_targets(&raw.to_string()),
+                Err(_) => continue,
+            };
+            if targets.is_empty() {
+                continue;
+            }
+            match fetch_feed(url).await {
+                Ok(xml) => logs.extend(run(feed, &xml, &targets, &kv, &sender).await),
+                Err(e) => logs.push(format!("{var}: feed unreadable: {e}")),
+            }
+        }
+        logs
     }
 
     // The workers.dev URL is public and always assigned, so it answers with a
@@ -411,10 +532,12 @@ mod glue {
     pub async fn fetch(_req: Request, _env: Env, _ctx: Context) -> Result<Response> {
         Response::ok(format!(
             "kotlin-releases-bot\n\n\
-             Announces new Kotlin releases and release candidates to Telegram.\n\n\
-             feed      {FEED_URL}\n\
-             keeps     vX.Y.Z and vX.Y.Z-RCn\n\
-             drops     betas and build-*-dev-* tags\n\
+             Announces Kotlin releases and blog posts to Telegram.\n\n\
+             releases  {RELEASES_URL}\n\
+             \x20         keeps vX.Y.Z and vX.Y.Z-RCn, drops betas and build-*-dev-*\n\
+             blog      {BLOG_URL}\n\
+             \x20         every post\n\n\
+             Each feed has its own destination list and its own records.\n\
              schedule  every 15 minutes\n\
              code      https://github.com/CommanderTvis/kotlin-releases-bot\n\n\
              There is no API here. The bot runs on a cron trigger and only sends.\n"

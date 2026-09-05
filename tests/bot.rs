@@ -7,6 +7,7 @@ use pollster::block_on;
 
 const DEV_ONLY: &str = include_str!("releases.atom");
 const MIXED: &str = include_str!("releases-mixed.atom");
+const BLOG: &str = include_str!("blog.xml");
 
 type Log = Rc<RefCell<Vec<String>>>;
 
@@ -119,8 +120,12 @@ impl Harness {
     }
 
     fn run(&self) -> Vec<String> {
+        self.run_feed(Feed::Releases, MIXED)
+    }
+
+    fn run_feed(&self, feed: Feed, xml: &str) -> Vec<String> {
         let targets = parse_targets("111,222:7");
-        block_on(run(MIXED, &targets, &self.store, &self.sender))
+        block_on(run(feed, xml, &targets, &self.store, &self.sender))
     }
 
     fn record(&self, key: &str) -> Option<Vec<String>> {
@@ -134,16 +139,16 @@ impl Harness {
 
 #[test]
 fn parses_the_live_feed_which_is_nothing_but_dev_builds() {
-    let releases = parse_feed(DEV_ONLY);
+    let releases = parse_atom(DEV_ONLY);
     assert_eq!(releases.len(), 10);
-    assert_eq!(releases[0].tag, "build-2.5.0-dev-6883");
-    assert!(releases.iter().all(|r| !is_release(&r.tag)));
+    assert_eq!(releases[0].id, "build-2.5.0-dev-6883");
+    assert!(releases.iter().all(|r| !is_release(&r.id)));
 }
 
 #[test]
 fn keeps_finals_and_candidates_drops_betas_and_dev_builds() {
-    let kept: Vec<Release> = parse_feed(MIXED).into_iter().filter(|r| is_release(&r.tag)).collect();
-    let tags: Vec<&str> = kept.iter().map(|r| r.tag.as_str()).collect();
+    let kept: Vec<Entry> = parse_atom(MIXED).into_iter().filter(|r| is_release(&r.id)).collect();
+    let tags: Vec<&str> = kept.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(tags, ["v2.4.20-RC3", "v2.4.10"]);
     assert_eq!(kept[0].title, "Kotlin 2.4.20-RC3");
     assert_eq!(kept[0].link, "https://github.com/JetBrains/kotlin/releases/tag/v2.4.20-RC3");
@@ -154,7 +159,7 @@ fn a_feed_holding_a_single_entry_parses_as_one_release() {
     let start = MIXED.find("<entry>").unwrap();
     let end = MIXED.find("</entry>").unwrap() + "</entry>".len();
     let one = format!("{}{}</feed>", &MIXED[..start], &MIXED[start..end]);
-    assert_eq!(parse_feed(&one).len(), 1);
+    assert_eq!(parse_atom(&one).len(), 1);
 }
 
 #[test]
@@ -163,9 +168,9 @@ fn entity_encoded_titles_survive_parsing_and_are_escaped_again() {
         "<title>Kotlin 2.4.10</title>",
         "<title>Kotlin 2.4.10 &amp; friends</title>",
     );
-    let release = parse_feed(&feed).into_iter().find(|r| r.tag == "v2.4.10").unwrap();
+    let release = parse_atom(&feed).into_iter().find(|r| r.id == "v2.4.10").unwrap();
     assert_eq!(release.title, "Kotlin 2.4.10 & friends");
-    assert!(format_message(&release).contains("Kotlin 2.4.10 &amp; friends"));
+    assert!(format_message(Feed::Releases, &release).contains("Kotlin 2.4.10 &amp; friends"));
 }
 
 #[test]
@@ -186,15 +191,15 @@ fn the_tag_filter_agrees_with_how_jetbrains_actually_tags() {
 
 #[test]
 fn formats_a_message_per_kind_and_escapes_the_title() {
-    let release = |tag: &str, title: &str| Release {
-        tag: tag.to_string(),
+    let release = |tag: &str, title: &str| Entry {
+        id: tag.to_string(),
         title: title.to_string(),
         link: "https://example.test/r".to_string(),
     };
-    assert!(format_message(&release("v2.4.20-RC3", "Kotlin 2.4.20-RC3"))
+    assert!(format_message(Feed::Releases, &release("v2.4.20-RC3", "Kotlin 2.4.20-RC3"))
         .starts_with("<b>Kotlin release candidate</b>"));
-    assert!(format_message(&release("v2.4.10", "Kotlin 2.4.10")).starts_with("<b>Kotlin release</b>"));
-    assert!(format_message(&release("v1.0.0", "Kotlin <1> & \"2\""))
+    assert!(format_message(Feed::Releases, &release("v2.4.10", "Kotlin 2.4.10")).starts_with("<b>Kotlin release</b>"));
+    assert!(format_message(Feed::Releases, &release("v1.0.0", "Kotlin <1> & \"2\""))
         .contains("Kotlin &lt;1&gt; &amp; \"2\""));
 }
 
@@ -235,7 +240,7 @@ fn a_rate_limit_carries_telegrams_own_retry_hint() {
 #[test]
 fn slow_mode_is_waited_out_inside_the_tick() {
     let h = Harness::scripted(
-        &[("seen:111", &[]), ("seen:222:7", &["v2.4.10", "v2.4.20-RC3"])],
+        &[("seen:release:111", &[]), ("seen:release:222:7", &["v2.4.10", "v2.4.20-RC3"])],
         &[("111", &[Outcome::RetryAfter(10)])],
         false,
     );
@@ -246,17 +251,17 @@ fn slow_mode_is_waited_out_inside_the_tick() {
     assert_eq!(
         for_111,
         [
-            "put seen:111 [\"v2.4.10\"]",
+            "put seen:release:111 [\"v2.4.10\"]",
             "send 111 Kotlin 2.4.10",
             "wait 10",
             "send 111 Kotlin 2.4.10",
-            "put seen:111 [\"v2.4.10\",\"v2.4.20-RC3\"]",
+            "put seen:release:111 [\"v2.4.10\",\"v2.4.20-RC3\"]",
             "send 111 Kotlin 2.4.20-RC3",
         ]
     );
     // Both releases still land, in one tick, exactly once each.
     assert_eq!(
-        h.record("seen:111"),
+        h.record("seen:release:111"),
         Some(vec!["v2.4.10".to_string(), "v2.4.20-RC3".to_string()])
     );
 }
@@ -264,13 +269,13 @@ fn slow_mode_is_waited_out_inside_the_tick() {
 #[test]
 fn a_rate_limit_longer_than_the_budget_is_left_for_the_next_tick() {
     let h = Harness::new(
-        &[("seen:111", &[]), ("seen:222:7", &["v2.4.10", "v2.4.20-RC3"])],
+        &[("seen:release:111", &[]), ("seen:release:222:7", &["v2.4.10", "v2.4.20-RC3"])],
         &[("111", Outcome::RetryAfter(3600))],
         false,
     );
     h.run();
     assert!(h.sender.waits.borrow().is_empty(), "an hour must not be waited out");
-    assert_eq!(h.record("seen:111"), Some(Vec::new()), "the claim is given back");
+    assert_eq!(h.record("seen:release:111"), Some(Vec::new()), "the claim is given back");
 }
 
 #[test]
@@ -288,13 +293,13 @@ fn a_destination_with_no_record_is_seeded_silently() {
     h.run();
     assert!(h.chats().is_empty());
     let expected = vec!["v2.4.20-RC3".to_string(), "v2.4.10".to_string()];
-    assert_eq!(h.record("seen:111"), Some(expected.clone()));
-    assert_eq!(h.record("seen:222:7"), Some(expected));
+    assert_eq!(h.record("seen:release:111"), Some(expected.clone()));
+    assert_eq!(h.record("seen:release:222:7"), Some(expected));
 }
 
 #[test]
 fn a_new_release_reaches_every_destination_oldest_first_with_the_topic_id() {
-    let h = Harness::new(&[("seen:111", &["v2.4.10"]), ("seen:222:7", &[])], &[], false);
+    let h = Harness::new(&[("seen:release:111", &["v2.4.10"]), ("seen:release:222:7", &[])], &[], false);
     h.run();
     let sent = h.sender.sent.borrow();
     let addressed: Vec<(&str, Option<&str>)> = sent
@@ -305,7 +310,7 @@ fn a_new_release_reaches_every_destination_oldest_first_with_the_topic_id() {
     assert!(sent[1].2.contains("Kotlin 2.4.10"));
     assert!(sent[2].2.contains("Kotlin 2.4.20-RC3"));
     assert_eq!(
-        h.record("seen:111"),
+        h.record("seen:release:111"),
         Some(vec!["v2.4.10".to_string(), "v2.4.20-RC3".to_string()])
     );
 }
@@ -313,7 +318,7 @@ fn a_new_release_reaches_every_destination_oldest_first_with_the_topic_id() {
 #[test]
 fn nothing_is_resent_once_every_destination_is_up_to_date() {
     let seen: &[&str] = &["v2.4.10", "v2.4.20-RC3"];
-    let h = Harness::new(&[("seen:111", seen), ("seen:222:7", seen)], &[], false);
+    let h = Harness::new(&[("seen:release:111", seen), ("seen:release:222:7", seen)], &[], false);
     h.run();
     assert!(h.chats().is_empty());
 }
@@ -321,7 +326,7 @@ fn nothing_is_resent_once_every_destination_is_up_to_date() {
 #[test]
 fn every_release_is_recorded_before_it_is_sent_never_after() {
     let h = Harness::new(
-        &[("seen:111", &[]), ("seen:222:7", &["v2.4.10", "v2.4.20-RC3"])],
+        &[("seen:release:111", &[]), ("seen:release:222:7", &["v2.4.10", "v2.4.20-RC3"])],
         &[],
         false,
     );
@@ -331,9 +336,9 @@ fn every_release_is_recorded_before_it_is_sent_never_after() {
     assert_eq!(
         for_111,
         [
-            "put seen:111 [\"v2.4.10\"]",
+            "put seen:release:111 [\"v2.4.10\"]",
             "send 111 Kotlin 2.4.10",
-            "put seen:111 [\"v2.4.10\",\"v2.4.20-RC3\"]",
+            "put seen:release:111 [\"v2.4.10\",\"v2.4.20-RC3\"]",
             "send 111 Kotlin 2.4.20-RC3",
         ]
     );
@@ -341,7 +346,7 @@ fn every_release_is_recorded_before_it_is_sent_never_after() {
 
 #[test]
 fn a_release_that_cannot_be_claimed_is_never_sent() {
-    let h = Harness::new(&[("seen:111", &[]), ("seen:222:7", &[])], &[], true);
+    let h = Harness::new(&[("seen:release:111", &[]), ("seen:release:222:7", &[])], &[], true);
     let logs = h.run();
     assert!(h.chats().is_empty(), "a failed claim must stop the send");
     assert!(logs.iter().all(|l| l.contains("not claimed")), "{logs:?}");
@@ -350,17 +355,17 @@ fn a_release_that_cannot_be_claimed_is_never_sent() {
 #[test]
 fn an_unknown_delivery_outcome_is_never_retried() {
     let h = Harness::new(
-        &[("seen:111", &[]), ("seen:222:7", &[])],
+        &[("seen:release:111", &[]), ("seen:release:222:7", &[])],
         &[("111", Outcome::Unknown)],
         false,
     );
     let logs = h.run();
     // The claim stands even though the send outcome is unknown.
-    assert_eq!(h.record("seen:111"), Some(vec!["v2.4.10".to_string()]));
+    assert_eq!(h.record("seen:release:111"), Some(vec!["v2.4.10".to_string()]));
     assert!(logs.iter().any(|l| l.contains("SKIPPED")), "{logs:?}");
 
     // Next tick: the ambiguous release is not sent again.
-    let next = Harness::new(&[("seen:111", &["v2.4.10"]), ("seen:222:7", &[])], &[], false);
+    let next = Harness::new(&[("seen:release:111", &["v2.4.10"]), ("seen:release:222:7", &[])], &[], false);
     next.run();
     let resent: Vec<String> = next
         .sender
@@ -376,16 +381,16 @@ fn an_unknown_delivery_outcome_is_never_retried() {
 #[test]
 fn a_release_telegram_provably_refused_is_released_and_retried_next_tick() {
     let h = Harness::new(
-        &[("seen:111", &[]), ("seen:222:7", &[])],
+        &[("seen:release:111", &[]), ("seen:release:222:7", &[])],
         &[("111", Outcome::Rejected)],
         false,
     );
     h.run();
     assert_eq!(h.chats(), ["222", "222"]);
-    assert_eq!(h.record("seen:111"), Some(Vec::new()));
+    assert_eq!(h.record("seen:release:111"), Some(Vec::new()));
 
     let next = Harness::new(
-        &[("seen:111", &[]), ("seen:222:7", &["v2.4.10", "v2.4.20-RC3"])],
+        &[("seen:release:111", &[]), ("seen:release:222:7", &["v2.4.10", "v2.4.20-RC3"])],
         &[],
         false,
     );
@@ -396,14 +401,77 @@ fn a_release_telegram_provably_refused_is_released_and_retried_next_tick() {
 #[test]
 fn a_failing_destination_neither_blocks_nor_duplicates_the_healthy_one() {
     let h = Harness::new(
-        &[("seen:111", &[]), ("seen:222:7", &[])],
+        &[("seen:release:111", &[]), ("seen:release:222:7", &[])],
         &[("111", Outcome::Rejected)],
         false,
     );
     h.run();
     assert_eq!(h.chats(), ["222", "222"]);
     assert_eq!(
-        h.record("seen:222:7"),
+        h.record("seen:release:222:7"),
         Some(vec!["v2.4.10".to_string(), "v2.4.20-RC3".to_string()])
     );
+}
+
+#[test]
+fn parses_the_blog_feed_including_cdata_bodies_and_encoded_guids() {
+    let entries = parse_rss(BLOG);
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].title, "Kotlin Toolchain 0.12: Multiplatform Library Publishing, Wasm Apps, and More");
+    assert!(entries[0].link.starts_with("https://blog.jetbrains.com/kotlin/2026/09/"));
+    // The guid is the id, and `&#038;` in it is decoded.
+    assert_eq!(entries[0].id, "https://blog.jetbrains.com/?post_type=kotlin&p=736282");
+    // Post bodies are CDATA; none of their markup leaks into a title or link.
+    assert!(entries.iter().all(|e| !e.title.contains('<') && !e.link.contains(' ')));
+    assert_eq!(entries[1].title, "Compose Multiplatform 1.12.0 Released");
+}
+
+#[test]
+fn a_blog_post_is_labelled_as_a_blog_post() {
+    let entry = &parse_rss(BLOG)[1];
+    let message = format_message(Feed::Blog, entry);
+    assert!(message.starts_with("<b>Kotlin blog</b>"), "{message}");
+    assert!(message.contains("Compose Multiplatform 1.12.0 Released"));
+    // The release wording never appears for a blog post.
+    assert!(!message.contains("Kotlin release"));
+}
+
+#[test]
+fn the_blog_feed_keeps_records_apart_from_the_releases_feed() {
+    // Same destinations, already up to date on releases, brand new to the blog.
+    let h = Harness::new(
+        &[
+            ("seen:release:111", &["v2.4.10", "v2.4.20-RC3"]),
+            ("seen:release:222:7", &["v2.4.10", "v2.4.20-RC3"]),
+        ],
+        &[],
+        false,
+    );
+    h.run_feed(Feed::Blog, BLOG);
+
+    // The blog is seeded silently under its own keys...
+    assert!(h.chats().is_empty(), "a first blog tick must not backfill");
+    let seeded = h.record("seen:blog:111").expect("blog record written");
+    assert_eq!(seeded.len(), 3);
+    assert!(seeded[0].starts_with("https://blog.jetbrains.com/?post_type=kotlin"));
+
+    // ...and the releases records are untouched.
+    assert_eq!(
+        h.record("seen:release:111"),
+        Some(vec!["v2.4.10".to_string(), "v2.4.20-RC3".to_string()])
+    );
+}
+
+#[test]
+fn a_new_blog_post_is_sent_to_the_blog_destinations() {
+    let older: Vec<String> = parse_rss(BLOG).into_iter().skip(1).map(|e| e.id).collect();
+    let seen: Vec<&str> = older.iter().map(String::as_str).collect();
+    let h = Harness::new(&[("seen:blog:111", &seen), ("seen:blog:222:7", &seen)], &[], false);
+    h.run_feed(Feed::Blog, BLOG);
+
+    // Only the one post missing from each record goes out.
+    assert_eq!(h.chats(), ["111", "222"]);
+    let sent = h.sender.sent.borrow();
+    assert!(sent[0].2.contains("Kotlin Toolchain 0.12"), "{}", sent[0].2);
+    assert!(sent[0].2.starts_with("<b>Kotlin blog</b>"));
 }

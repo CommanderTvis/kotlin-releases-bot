@@ -7,7 +7,7 @@ tags: [product, scope]
 ---
 ## Goal
 
-A Telegram bot that announces new Kotlin releases. It watches the GitHub releases feed of `JetBrains/kotlin` and posts one message per new stable release or release candidate to every destination in a configured list. A destination is a private chat, a channel, a group, or a forum topic inside a group, and the bot fans the same announcement out to all of them. Dev builds and other pre-release churn are dropped.
+A Telegram bot that announces new Kotlin releases and new posts on the Kotlin blog. It watches two feeds, each with its own destination list, and posts one message per new item to every destination on that feed's list. A destination is a private chat, a channel, a group, or a forum topic inside a group, and the bot fans the same announcement out to all of them. Dev builds and other pre-release churn are dropped.
 
 It is for a single operator who maintains one bot and a set of destinations they control, and for the readers of those destinations who want to hear about Kotlin releases without following GitHub. It runs on Cloudflare Workers and must fit inside the Free plan indefinitely, so the design leans on the smallest number of invocations, subrequests, and storage writes that still gets a release out within a few minutes of it appearing.
 
@@ -19,12 +19,26 @@ The feed has no push counterpart the bot can subscribe to without write access t
 
 Every candidate source has to be readable without credentials. A source needing one would mean another thing to rotate and another way for the bot to go quiet. That rules out the GitHub REST API, which carries the `prerelease` flag the tag filter has to infer, but allows only sixty unauthenticated requests an hour per address and Workers send from shared addresses.
 
+The bot follows two feeds. They differ in shape (Atom against RSS), in what gets filtered (release tags against nothing at all), and in who wants them, so each keeps its own destination list and its own delivery records.
+
+!control select feed-targeting
+= A separate destination list per feed — a channel can take releases without taking blog posts, which is the actual difference in appetite: releases are rare and load-bearing, blog posts are frequent and editorial
+- One list for every feed — one secret to maintain, but a destination that wants only releases would have to be dropped entirely
+- One list plus a per-destination filter — the most expressive, and the most configuration to get wrong for two feeds and a handful of chats
+
 !control select data-source
 = GitHub releases Atom feed — no credentials, and unlike the REST API it is not metered per address, so it cannot be starved by other Workers sharing an egress address; one small document carries the tag, the title and the link
 - Maven Central coordinates for `org.jetbrains.kotlin:kotlin-stdlib` — no credentials, authoritative for what a build can actually resolve, and immune to how JetBrains chooses to tag; it has no title, no notes and nothing to link to
 - The releases page on kotlinlang.org — no credentials, and it reflects what JetBrains announces to users rather than what it tags; it is HTML written for humans, so a redesign breaks the parser with no error
 
 The feed is one document holding the last ten releases, roughly 50 to 150 KB with release notes inlined.
+
+The blog feed is WordPress RSS at `https://blog.jetbrains.com/kotlin/feed/`, about 185 KB for twelve posts, most of it post bodies carried as CDATA. Nothing is filtered out of it: every new post is announced. Parsing is the same streaming pass, and because the bodies are CDATA rather than markup, none of their HTML can be mistaken for feed structure.
+
+!control select blog-entry-id
+= The `<guid>` element — WordPress keeps it stable when a post is renamed or its URL changes, so an edit cannot re-announce a post
+- The post link — human-readable in the record and one field fewer to read, but a slug edit would look like a new post
+- A hash of the title and date — independent of the feed's own identifiers, and unreadable when an operator has to inspect a record by hand
 
 The filter is by tag name, since the Atom feed does not carry GitHub's `prerelease` flag. Two tag conventions live in this repository. Real releases are tagged `v2.4.10` for a final, `v2.4.20-RC` and `v2.4.20-RC3` for candidates, and `v2.4.20-Beta1` for betas. Everything TeamCity labels is tagged `build-`, as in `build-2.5.0-dev-6883` and `build-2.4.20-377`. The filter is therefore an allow-list, `/^v\d+\.\d+\.\d+(-RC\d*)?$/`, which admits finals and candidates and rejects both betas and every shape of build tag.
 
@@ -119,7 +133,7 @@ The bot needs to remember what each destination has already received. Everything
 - One shared `seen` key written after every destination succeeds — one key instead of a dozen, but a single permanently broken destination blocks the write forever and re-sends every release to every healthy chat on every tick
 - One key per destination per release — the finest grain and the easiest to inspect, but it turns a bounded set of small values into unbounded key growth
 
-Each key holds a JSON array of announced tag names, capped at the last 50. The feed only ever shows the last ten releases, so anything older cannot reappear.
+Records are keyed `seen:release:<destination>` and `seen:blog:<destination>`, so the two feeds never collide and a destination can be on one list without the other. Each key holds a JSON array of announced ids, capped at the last 50. The feed only ever shows the last ten releases, so anything older cannot reappear.
 
 On a destination's first tick its key is absent. The bot seeds it with every matching entry currently in the feed and sends nothing to it, so neither a fresh deployment nor a newly added chat replays ten old releases. Existing destinations are untouched by a new one being added.
 
@@ -195,8 +209,8 @@ The wait is bounded at sixty seconds per release. A longer hint leaves the claim
 A skipped release is logged with the destination and the tag and the word `SKIPPED`, which is the operator's signal that a message needs sending by hand. Recovering one is an edit to that destination's record:
 
 ```shell
-wrangler kv key get --binding SEEN "seen:-1001234567890"
-wrangler kv key put --binding SEEN "seen:-1001234567890" '["v2.4.10"]'
+wrangler kv key get --binding SEEN "seen:release:-1001234567890"
+wrangler kv key put --binding SEEN "seen:release:-1001234567890" '["v2.4.10"]'
 ```
 
 ## Building, testing, and deploying
@@ -290,9 +304,11 @@ Cloudflare assigns a `workers.dev` URL whether or not the Worker wants one, and 
 - A destination added to `TARGETS` receives nothing on its first tick, only releases published after it was added.
 - No build tag or beta is ever sent while `release-kinds` excludes them.
 - All destinations receive identical message text for a given release.
-- The bot token and the destination list exist only as Worker secrets, never in the repository, the logs, or the messages.
+- The bot token and both destination lists exist only as Worker secrets, never in the repository, the logs, or the messages.
+- A feed with no destination list configured is not fetched at all.
+- A destination on one feed's list receives nothing from the other feed.
 - The HTTP handler reads no binding, so no destination can be discovered from the public URL.
-- The feed is fetched exactly once per tick regardless of how many destinations are configured.
+- Each subscribed feed is fetched exactly once per tick, regardless of how many destinations are on its list.
 - Message text sent to Telegram is HTML-escaped before interpolation.
 - The parser and the `TARGETS` parser are tested against real inputs, and a change in GitHub's feed shape fails a test rather than silently posting nothing.
 - The store and the sender are reachable behind traits, so the claim-before-send ordering is asserted by a test rather than trusted.

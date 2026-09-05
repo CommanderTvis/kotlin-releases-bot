@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"
+	xmlns:content="http://purl.org/rss/1.0/modules/content/"
+	xmlns:wfw="http://wellformedweb.org/CommentAPI/"
+	xmlns:dc="http://purl.org/dc/elements/1.1/"
+	xmlns:atom="http://www.w3.org/2005/Atom"
+	xmlns:sy="http://purl.org/rss/1.0/modules/syndication/"
+	xmlns:slash="http://purl.org/rss/1.0/modules/slash/"
+	>
+
+<channel>
+	<title>Kotlin : A concise multiplatform language developed by JetBrains | The JetBrains Blog</title>
+	<atom:link href="https://blog.jetbrains.com/kotlin/feed/" rel="self" type="application/rss+xml" />
+	<link>https://blog.jetbrains.com</link>
+	<description>Developer Tools for Professionals and Teams</description>
+	<lastBuildDate>Fri, 04 Sep 2026 10:19:27 +0000</lastBuildDate>
+	<language>en-US</language>
+	<sy:updatePeriod>
+	hourly	</sy:updatePeriod>
+	<sy:updateFrequency>
+	1	</sy:updateFrequency>
+	
+
+<image>
+	<url>https://blog.jetbrains.com/wp-content/uploads/2024/01/cropped-mstile-310x310-1-32x32.png</url>
+	<title>Kotlin : A concise multiplatform language developed by JetBrains | The JetBrains Blog</title>
+	<link>https://blog.jetbrains.com</link>
+	<width>32</width>
+	<height>32</height>
+</image> 
+	<item>
+		<title>Kotlin Toolchain 0.12: Multiplatform Library Publishing, Wasm Apps, and More</title>
+		<link>https://blog.jetbrains.com/kotlin/2026/09/kotlin-toolchain-0-12-multiplatform-library-publishing-wasm-apps-and-more/</link>
+		
+		<dc:creator><![CDATA[Joffrey Bion]]></dc:creator>
+		<pubDate>Thu, 03 Sep 2026 10:40:05 +0000</pubDate>
+		<featuredImage>https://blog.jetbrains.com/wp-content/uploads/2026/09/KT-social-BlogFeatured-1280x720-1.png</featuredImage>		<product ><![CDATA[amper]]></product>
+		<category><![CDATA[kotlin]]></category>
+		<category><![CDATA[multiplatform]]></category>
+		<category><![CDATA[releases]]></category>
+		<category><![CDATA[toolchain]]></category>
+		<category><![CDATA[news]]></category>
+		<category><![CDATA[toolchains]]></category>
+		<guid isPermaLink="false">https://blog.jetbrains.com/?post_type=kotlin&#038;p=736282</guid>
+
+					<description><![CDATA[Kotlin Toolchain 0.12.0 is out. This release brings some long-awaited features: multiplatform libraries publication, a preview of Wasm application support, Compose Hot Reload from the command line, an…]]></description>
+										<content:encoded><![CDATA[
+<p>Kotlin Toolchain 0.12.0 is out. This release brings some long-awaited features: multiplatform libraries publication, a preview of Wasm application support, Compose Hot Reload from the command line…]]></content:encoded>
+					
+		
+		
+			</item>
+<item>
+		<title>Compose Multiplatform 1.12.0 Released</title>
+		<link>https://blog.jetbrains.com/kotlin/2026/08/compose-multiplatform-1-12-0/</link>
+					<comments>https://blog.jetbrains.com/kotlin/2026/08/compose-multiplatform-1-12-0/#respond</comments>
+		
+		<dc:creator><![CDATA[Elvira Mustafina]]></dc:creator>
+		<pubDate>Wed, 26 Aug 2026 13:28:41 +0000</pubDate>
+		<featuredImage>https://blog.jetbrains.com/wp-content/uploads/2026/08/CMP-social-BlogFeatured-1280x720-1.png</featuredImage>		<category><![CDATA[multiplatform]]></category>
+		<category><![CDATA[releases]]></category>
+		<category><![CDATA[compose-for-desktop]]></category>
+		<category><![CDATA[compose-for-web]]></category>
+		<category><![CDATA[compose-hot-reload]]></category>
+		<category><![CDATA[mcp]]></category>
+		<guid isPermaLink="false">https://blog.jetbrains.com/?post_type=kotlin&#038;p=734018</guid>
+
+					<description><![CDATA[Compose Multiplatform 1.12.0 is out! This version brings new tooling for AI assistants, improvements to web resource management, and finer control over desktop window states. Here are the highlights o…]]></description>
+										<content:encoded><![CDATA[
+<p>Compose Multiplatform 1.12.0 is out! This version brings new tooling for AI assistants, improvements to web resource management, and finer control over desktop window states.</p>
+
+
+
+<p>Here are th…]]></content:encoded>
+					
+					<wfw:commentRss>https://blog.jetbrains.com/kotlin/2026/08/compose-multiplatform-1-12-0/feed/</wfw:commentRss>
+			<slash:comments>0</slash:comments>
+		
+		
+			</item>
+<item>
+		<title>Signatures, be true: domain errors and functional handling in Kotlin</title>
+		<link>https://blog.jetbrains.com/kotlin/2026/08/signatures-be-true-domain-errors-and-functional-handling-in-kotlin/</link>
+		
+		<dc:creator><![CDATA[Viliam Sedliak]]></dc:creator>
+		<pubDate>Wed, 19 Aug 2026 15:52:05 +0000</pubDate>
+		<featuredImage>https://blog.jetbrains.com/wp-content/uploads/2026/08/KT-social-BlogFeatured-1280x720-1-1.png</featuredImage>		<category><![CDATA[backend]]></category>
+		<category><![CDATA[kotlin]]></category>
+		<guid isPermaLink="false">https://blog.jetbrains.com/?post_type=kotlin&#038;p=732373</guid>
+
+					<description><![CDATA[Here’s a function that signs a document: In Kotlin, Unit means the function completes without returning a meaningful value – roughly equivalent to void in Java. Got it? Now, tell me what could go wron…]]></description>
+										<content:encoded><![CDATA[
+
+    <div class="about-author ">
+        <div class="about-author__box">
+            <div class="row">
+                                                            <div class="about-author__box-img">
+…]]></content:encoded>
+					
+		
+		
+			</item>
+</channel>
+</rss>

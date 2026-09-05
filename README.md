@@ -1,29 +1,34 @@
 # kotlin-releases-bot
 
-Announces new Kotlin releases to Telegram. Every 15 minutes a Cloudflare Worker
-reads the [`JetBrains/kotlin` releases feed](https://github.com/JetBrains/kotlin/releases.atom),
-keeps tags matching `vX.Y.Z` and `vX.Y.Z-RCn`, drops betas and `build-*-dev-*`,
-and posts each new one to every configured destination — a chat, channel, group
-or forum topic.
+Announces Kotlin releases and blog posts to Telegram. Every 15 minutes a
+Cloudflare Worker reads two feeds and posts anything new to that feed's own list
+of destinations — a chat, channel, group or forum topic.
+
+- [Releases](https://github.com/JetBrains/kotlin/releases.atom): keeps tags
+  matching `vX.Y.Z` and `vX.Y.Z-RCn`, drops betas and `build-*-dev-*`.
+- [Blog](https://blog.jetbrains.com/kotlin/feed/): every new post.
 
 ```mermaid
 flowchart LR
     cron([cron · 15 min]) --> worker[Worker]
-    feed[("releases.atom")] --> worker
-    worker <--> kv[("KV · seen tags<br/>one key per destination")]
+    releases[("releases.atom")] --> worker
+    blog[("blog RSS")] --> worker
+    worker <--> kv[("KV · seen ids<br/>one key per feed + destination")]
     worker --> tg[["Telegram sendMessage"]]
 ```
 
-Each destination is tracked separately, and a release is written to its record
-*before* it is sent, so a failure loses a message rather than duplicating one.
+Each feed tracks each destination separately, and an item is written to its
+record *before* it is sent, so a failure loses a message rather than
+duplicating one.
 
 ## Environment
 
 | Name | Kind | Meaning |
 |---|---|---|
 | `BOT_TOKEN` | secret | Telegram bot token from BotFather |
-| `TARGETS` | secret | Comma-separated `chat_id` or `chat_id:topic_id`, e.g. `-1001234567890,-1009876543210:42` |
-| `SEEN` | KV binding | Delivery records, keyed `seen:<destination>` |
+| `TARGETS` | secret | Release destinations: comma-separated `chat_id` or `chat_id:topic_id`, e.g. `-1001234567890,-1009876543210:42` |
+| `BLOG_TARGETS` | secret | Blog destinations, same format. Unset means the blog feed is not fetched |
+| `SEEN` | KV binding | Delivery records, keyed `seen:release:<destination>` and `seen:blog:<destination>` |
 
 Secrets are set with `wrangler secret put`; locally they come from `.dev.vars`.
 A destination with no record yet is seeded silently, so adding one never
