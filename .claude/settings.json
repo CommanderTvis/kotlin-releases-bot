@@ -1,0 +1,6 @@
+{
+  "enabledPlugins": {
+    "cloudflare@cloudflare": true,
+    "rust-analyzer-lsp@claude-plugins-official": true
+  }
+}
