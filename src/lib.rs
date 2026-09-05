@@ -14,6 +14,12 @@ pub const FEED_URL: &str = "https://github.com/JetBrains/kotlin/releases.atom";
 /// The feed only ever shows the last ten releases, so nothing older can return.
 const SEEN_CAP: usize = 50;
 
+/// Longest rate limit the bot will sit out inside a tick. A cron invocation may
+/// run for fifteen minutes of wall clock and waiting costs no CPU, so ten
+/// entries each waiting this long still finishes well inside the window.
+/// Anything longer is left for the next tick.
+const MAX_RETRY_WAIT: u64 = 60;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
     pub tag: String,
@@ -35,6 +41,9 @@ pub enum Outcome {
     Rejected,
     /// The send may have landed with only the acknowledgement lost.
     Unknown,
+    /// Refused with a rate limit and Telegram's own retry hint, in seconds.
+    /// Still proof of non-delivery, so sending again cannot duplicate.
+    RetryAfter(u64),
 }
 
 pub trait Store {
@@ -46,6 +55,8 @@ pub trait Store {
 
 pub trait Sender {
     async fn send(&self, target: &Target, text: &str) -> Outcome;
+    /// Sits out a rate limit. Spends wall clock, not CPU.
+    async fn wait(&self, seconds: u64);
 }
 
 pub fn parse_feed(xml: &str) -> Vec<Release> {
@@ -180,9 +191,15 @@ pub fn classify(status: u16, body: &str) -> Outcome {
     if (200..300).contains(&status) {
         return Outcome::Sent;
     }
-    match serde_json::from_str::<serde_json::Value>(body) {
-        Ok(value) if value.get("ok") == Some(&serde_json::Value::Bool(false)) => Outcome::Rejected,
-        _ => Outcome::Unknown,
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Outcome::Unknown;
+    };
+    if value.get("ok") != Some(&serde_json::Value::Bool(false)) {
+        return Outcome::Unknown;
+    }
+    match value.pointer("/parameters/retry_after").and_then(serde_json::Value::as_u64) {
+        Some(seconds) => Outcome::RetryAfter(seconds),
+        None => Outcome::Rejected,
     }
 }
 
@@ -238,9 +255,28 @@ pub async fn run<S: Store, T: Sender>(
                 break;
             }
 
-            match sender.send(target, &format_message(release)).await {
+            let text = format_message(release);
+            let mut outcome = sender.send(target, &text).await;
+
+            // Slow mode is permanent in some groups, so a rate limit is the
+            // normal case rather than an incident. The 429 carries Telegram's
+            // envelope, which proves nothing was posted, so waiting and sending
+            // again cannot duplicate the message.
+            if let Outcome::RetryAfter(seconds) = outcome {
+                if seconds <= MAX_RETRY_WAIT {
+                    logs.push(format!(
+                        "target {}: rate limited, waiting {seconds}s for {}",
+                        target.key, release.tag
+                    ));
+                    sender.wait(seconds).await;
+                    outcome = sender.send(target, &text).await;
+                }
+            }
+
+            match outcome {
                 Outcome::Sent => continue,
-                Outcome::Rejected => {
+                // A rate limit still standing is left for the next tick.
+                Outcome::Rejected | Outcome::RetryAfter(_) => {
                     record.pop();
                     match store.put(&key, &record).await {
                         Ok(()) => logs.push(format!(
@@ -270,6 +306,7 @@ pub async fn run<S: Store, T: Sender>(
 #[cfg(target_arch = "wasm32")]
 mod glue {
     use super::*;
+    use std::time::Duration;
     use worker::*;
 
     struct Kv(kv::KvStore);
@@ -297,6 +334,10 @@ mod glue {
     }
 
     impl Sender for Telegram {
+        async fn wait(&self, seconds: u64) {
+            Delay::from(Duration::from_secs(seconds)).await
+        }
+
         async fn send(&self, target: &Target, text: &str) -> Outcome {
             let mut body = serde_json::json!({
                 "chat_id": target.chat_id,

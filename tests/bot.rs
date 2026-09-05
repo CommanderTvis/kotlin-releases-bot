@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use kotlin_releases_bot::*;
@@ -32,15 +32,29 @@ impl Store for FakeStore {
 }
 
 struct FakeSender {
-    behaviour: HashMap<String, Outcome>,
+    /// One scripted outcome per send, consumed in order; anything after the
+    /// script succeeds.
+    script: RefCell<HashMap<String, VecDeque<Outcome>>>,
     log: Log,
     sent: RefCell<Vec<(String, Option<String>, String)>>,
+    waits: RefCell<Vec<u64>>,
 }
 
 impl Sender for FakeSender {
+    async fn wait(&self, seconds: u64) {
+        self.log.borrow_mut().push(format!("wait {seconds}"));
+        self.waits.borrow_mut().push(seconds);
+    }
+
     async fn send(&self, target: &Target, text: &str) -> Outcome {
         self.log.borrow_mut().push(format!("send {} {}", target.chat_id, version_in(text)));
-        match self.behaviour.get(&target.chat_id).copied().unwrap_or(Outcome::Sent) {
+        let next = self
+            .script
+            .borrow_mut()
+            .get_mut(&target.chat_id)
+            .and_then(VecDeque::pop_front)
+            .unwrap_or(Outcome::Sent);
+        match next {
             Outcome::Sent => {
                 self.sent.borrow_mut().push((
                     target.chat_id.clone(),
@@ -70,6 +84,14 @@ struct Harness {
 
 impl Harness {
     fn new(seen: &[(&str, &[&str])], behaviour: &[(&str, Outcome)], refuse_put: bool) -> Self {
+        let scripted: Vec<(&str, Vec<Outcome>)> =
+            behaviour.iter().map(|(chat, outcome)| (*chat, vec![*outcome])).collect();
+        let borrowed: Vec<(&str, &[Outcome])> =
+            scripted.iter().map(|(chat, outcomes)| (*chat, outcomes.as_slice())).collect();
+        Self::scripted(seen, &borrowed, refuse_put)
+    }
+
+    fn scripted(seen: &[(&str, &[&str])], script: &[(&str, &[Outcome])], refuse_put: bool) -> Self {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         Harness {
             store: FakeStore {
@@ -82,9 +104,15 @@ impl Harness {
                 refuse_put,
             },
             sender: FakeSender {
-                behaviour: behaviour.iter().map(|(k, o)| (k.to_string(), *o)).collect(),
+                script: RefCell::new(
+                    script
+                        .iter()
+                        .map(|(chat, outcomes)| (chat.to_string(), outcomes.iter().copied().collect()))
+                        .collect(),
+                ),
                 log: log.clone(),
                 sent: RefCell::new(Vec::new()),
+                waits: RefCell::new(Vec::new()),
             },
             log,
         }
@@ -193,6 +221,56 @@ fn only_telegrams_own_envelope_counts_as_proof_of_non_delivery() {
     assert_eq!(classify(429, "{\"ok\":false,\"error_code\":429}"), Outcome::Rejected);
     assert_eq!(classify(502, "<html>Bad Gateway</html>"), Outcome::Unknown);
     assert_eq!(classify(500, ""), Outcome::Unknown);
+}
+
+#[test]
+fn a_rate_limit_carries_telegrams_own_retry_hint() {
+    let body = "{\"ok\":false,\"error_code\":429,\"description\":\"Too Many Requests: retry after 10\",\
+                \"parameters\":{\"retry_after\":10}}";
+    assert_eq!(classify(429, body), Outcome::RetryAfter(10));
+    // A 429 without the hint is still a plain refusal.
+    assert_eq!(classify(429, "{\"ok\":false,\"error_code\":429}"), Outcome::Rejected);
+}
+
+#[test]
+fn slow_mode_is_waited_out_inside_the_tick() {
+    let h = Harness::scripted(
+        &[("seen:111", &[]), ("seen:222:7", &["v2.4.10", "v2.4.20-RC3"])],
+        &[("111", &[Outcome::RetryAfter(10)])],
+        false,
+    );
+    h.run();
+    assert_eq!(*h.sender.waits.borrow(), [10]);
+    let log = h.log.borrow();
+    let for_111: Vec<&String> = log.iter().filter(|l| l.contains("111") || l.starts_with("wait")).collect();
+    assert_eq!(
+        for_111,
+        [
+            "put seen:111 [\"v2.4.10\"]",
+            "send 111 Kotlin 2.4.10",
+            "wait 10",
+            "send 111 Kotlin 2.4.10",
+            "put seen:111 [\"v2.4.10\",\"v2.4.20-RC3\"]",
+            "send 111 Kotlin 2.4.20-RC3",
+        ]
+    );
+    // Both releases still land, in one tick, exactly once each.
+    assert_eq!(
+        h.record("seen:111"),
+        Some(vec!["v2.4.10".to_string(), "v2.4.20-RC3".to_string()])
+    );
+}
+
+#[test]
+fn a_rate_limit_longer_than_the_budget_is_left_for_the_next_tick() {
+    let h = Harness::new(
+        &[("seen:111", &[]), ("seen:222:7", &["v2.4.10", "v2.4.20-RC3"])],
+        &[("111", Outcome::RetryAfter(3600))],
+        false,
+    );
+    h.run();
+    assert!(h.sender.waits.borrow().is_empty(), "an hour must not be waited out");
+    assert_eq!(h.record("seen:111"), Some(Vec::new()), "the claim is given back");
 }
 
 #[test]

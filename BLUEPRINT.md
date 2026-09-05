@@ -179,8 +179,18 @@ A send whose outcome is genuinely unknown is the hard case, and it decides the w
 
 !control select target-failure-handling
 = Skip the rest of that destination's queue for this tick — the other destinations are unaffected, and a transient problem clears itself within fifteen minutes
-- Retry inside the tick with backoff — recovers from a brief blip a quarter hour sooner, but Telegram's `retry_after` on a 429 routinely exceeds the time a Worker should spend in one invocation
+- Retry every failure inside the tick with backoff — would also recover from a blip a quarter hour sooner, but an ambiguous outcome must never be retried, so this would trade the duplicate guarantee for latency
 - Drop a destination automatically after a 403 — stops a dead chat being polled forever, but the bot cannot write to `wrangler.toml`, so the removal would live in state the operator cannot see
+
+A rate limit is the exception, because it is not a failure. Telegram slow mode is a standing setting in some groups: the Kotlin Community forum holds it at ten seconds, so two releases in one tick are guaranteed to trip it. Treating that as a failed destination would deliver one release per tick and stretch a pair of announcements across half an hour.
+
+!control select rate-limit-handling
+= Wait out `retry_after` and send again, for hints up to a minute — a 429 carries Telegram's envelope and so proves non-delivery, which makes sending again safe; a cron tick may use fifteen minutes of wall clock and waiting spends none of the 10 ms CPU budget
+- Treat a rate limit like any other refusal — no waiting code at all, but a group with permanent slow mode then receives at most one release per fifteen minutes
+- Space every send by a fixed delay — never trips the limit in the first place, but pays the delay on every tick for a limit most destinations do not have
+- Wait however long Telegram asks — handles an hour-long slow mode too, but a tick would sit idle long enough to collide with the next one
+
+The wait is bounded at sixty seconds per release. A longer hint leaves the claim released and the release for the next tick, which is the ordinary refusal path.
 
 A skipped release is logged with the destination and the tag and the word `SKIPPED`, which is the operator's signal that a message needs sending by hand. Recovering one is an edit to that destination's record:
 
@@ -254,7 +264,9 @@ Only Telegram's error envelope counts as proof of non-delivery. Treating any fai
 
 Adding a destination seeds it silently instead of backfilling. A new chat wants the next release, not the last ten.
 
-There is no retry inside a tick. The next scheduled tick is the only retry, and a release stays in the feed for hours, so waiting costs nothing.
+The only retry inside a tick follows a 429. Every other failure waits for the next scheduled tick, and a release stays in the feed for hours, so waiting costs nothing.
+
+Waiting out slow mode is safe precisely because of the rule that governs everything else here: Telegram's error envelope proves the message was not posted. A rate limit is the one refusal that is expected to succeed on a second attempt, so it is the one worth repeating immediately.
 
 Cloudflare assigns a `workers.dev` URL whether or not the Worker wants one, and a Worker with no `fetch` handler answers it with a bare "Worker threw exception" page. The bot answers with a fixed description of itself instead. That is presentation, not an API: the handler takes no input, reads no binding, and has nothing to authenticate.
 
@@ -268,7 +280,8 @@ Cloudflare assigns a `workers.dev` URL whether or not the Worker wants one, and 
 
 - No destination ever receives the same release twice, under any failure, retry, or restart.
 - A release is written to a destination's record before it is sent, never after, and a claim that fails to write stops the send.
-- A send whose outcome is unknown is never attempted again; a send Telegram explicitly refused is.
+- A send whose outcome is unknown is never attempted again; a send Telegram explicitly refused is, including after waiting out a rate limit.
+- A release is sent again inside a tick only after a 429, which proves the earlier attempt was not delivered.
 - A replayed tick sends nothing that the run it replaces already claimed, because the claim precedes the send.
 - The scheduled handler logs every failure and returns normally, and nothing on the tick path panics.
 - Every skipped release is logged with its destination and tag, so a missed message is recoverable by hand rather than silent.

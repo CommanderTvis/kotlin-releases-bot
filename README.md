@@ -30,7 +30,3 @@ A destination with no record yet is seeded silently, so adding one never
 replays old releases.
 
 Design and rejected alternatives: [BLUEPRINT.md](BLUEPRINT.md).
-
-## License
-
-[Apache License 2.0](LICENSE).
