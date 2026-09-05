@@ -17,7 +17,7 @@ Every tick the bot fetches `https://github.com/JetBrains/kotlin/releases.atom`, 
 
 The feed has no push counterpart the bot can subscribe to without write access to the JetBrains repository, so polling is the only way in.
 
-Every candidate source has to be readable without credentials. The bot holds one secret, the Telegram token, and a source needing a second one would mean another thing to rotate and another way for the bot to go quiet. That rules out the GitHub REST API, which carries the `prerelease` flag the tag filter has to infer, but allows only sixty unauthenticated requests an hour per address and Workers send from shared addresses.
+Every candidate source has to be readable without credentials. A source needing one would mean another thing to rotate and another way for the bot to go quiet. That rules out the GitHub REST API, which carries the `prerelease` flag the tag filter has to infer, but allows only sixty unauthenticated requests an hour per address and Workers send from shared addresses.
 
 !control select data-source
 = GitHub releases Atom feed — no credentials, and unlike the REST API it is not metered per address, so it cannot be starved by other Workers sharing an egress address; one small document carries the tag, the title and the link
@@ -41,11 +41,14 @@ The build tags dominate the feed. At the time of writing all ten entries the fee
 A destination is one `chat_id`, optionally paired with a `message_thread_id` when it is a forum topic. Telegram's `sendMessage` handles all four destination kinds through those two fields, so the bot has one send path and a destination is fully described by a pair of numbers.
 
 !control select target-configuration
-= Static list in `wrangler.toml` vars — the destinations change rarely, are known to the operator, and a redeploy is the same command as any other change
+= Worker secret set with `wrangler secret put` — the destination ids never enter the repository, which matters because it is public; the value survives redeploys and changes without touching the code
+- Static list in `wrangler.toml` vars — the running configuration sits in version control where it can be reviewed and diffed; only workable if the repository is private
 - Subscription via bot commands (`/subscribe` in a chat) — lets anyone add the bot to their own group, but needs a Telegram webhook, an HTTP handler, KV writes on every command, and abuse handling
-- List in KV edited with `wrangler kv` — changes without redeploy, but then the running configuration lives outside version control
+- List in KV edited with `wrangler kv` — changes without a deploy at all, but the configuration then lives somewhere neither the repository nor the secret list records
 
 `TARGETS` is a comma-separated list of `chat_id` or `chat_id:thread_id` values, for example `-1001234567890,-1009876543210:42,123456789`. Each entry is parsed into a destination and gets a stable key from its own text, so adding or removing one destination never disturbs another's delivery record.
+
+It is stored as a secret rather than a var, so `wrangler.toml` names no destination at all. Nothing in the code changes: the Workers runtime hands vars and secrets to the Worker the same way, and workers-rs reads either through `env.var`. Local runs read it from `.dev.vars`, which is not in version control.
 
 !control select fan-out-strategy
 = Sequential sends, destination by destination — keeps every destination's ordering identical, keeps peak Telegram rate well under the 30-messages-per-second global limit, and the whole fan-out is a few hundred milliseconds of wall clock the Worker spends waiting, not computing
@@ -224,13 +227,14 @@ Local verification of the whole loop uses `wrangler dev --test-scheduled` and a 
 [ ] GitHub Actions on push to `main` — add when a second person needs to ship without Cloudflare credentials, accepting a corepack step in the workflow to get pnpm
 [ ] Cloudflare Workers Builds git integration — add if the repository moves to a Cloudflare-connected account and pushes should deploy without any workflow file
 
-`BOT_TOKEN` is a Worker secret set with `wrangler secret put` and never appears in the repository. A first deployment is five commands and one edit:
+`BOT_TOKEN` and `TARGETS` are Worker secrets and never appear in the repository. A first deployment is six commands and one edit:
 
 ```shell
 rustup target add wasm32-unknown-unknown
 pnpm install
 wrangler kv namespace create SEEN   # put the printed id in wrangler.toml
 wrangler secret put BOT_TOKEN
+wrangler secret put TARGETS
 wrangler deploy
 ```
 
@@ -267,7 +271,7 @@ The bot has no HTTP handler. Nothing needs to reach it, which also means there i
 - A destination added to `TARGETS` receives nothing on its first tick, only releases published after it was added.
 - No build tag or beta is ever sent while `release-kinds` excludes them.
 - All destinations receive identical message text for a given release.
-- The bot token exists only as a Worker secret and never in the repository, the logs, or the messages.
+- The bot token and the destination list exist only as Worker secrets, never in the repository, the logs, or the messages.
 - The feed is fetched exactly once per tick regardless of how many destinations are configured.
 - Message text sent to Telegram is HTML-escaped before interpolation.
 - The parser and the `TARGETS` parser are tested against real inputs, and a change in GitHub's feed shape fails a test rather than silently posting nothing.
@@ -284,6 +288,6 @@ The bot has no HTTP handler. Nothing needs to reach it, which also means there i
 - Watching other repositories. The source is a decision in this document, not a runtime configuration.
 - Release notes in the message. The link and Telegram's preview card carry them.
 - Spilling a large fan-out across ticks. The design assumes a destination count in the low dozens.
-- Any data source needing credentials, including the authenticated GitHub REST API. The Telegram token stays the only secret.
+- Any data source needing credentials, including the authenticated GitHub REST API. Reading the feed stays unauthenticated.
 - Any test that runs the deployed WebAssembly. Native `cargo test` covers the logic; `wrangler dev` is the only check that the real module loads.
 - Metrics, dashboards, or alerting. The Worker log in the Cloudflare dashboard is the observability.

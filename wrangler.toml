@@ -8,10 +8,6 @@ command = "cargo install -q worker-build && worker-build --release"
 [triggers]
 crons = ["*/15 * * * *"]
 
-[vars]
-# chat_id, or chat_id:message_thread_id for a forum topic. Comma-separated.
-TARGETS = ""
-
 [[kv_namespaces]]
 binding = "SEEN"
 id = "replace-with-your-namespace-id"
