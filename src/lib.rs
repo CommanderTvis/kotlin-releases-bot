@@ -23,11 +23,17 @@ pub const BLOG_URL: &str = "https://blog.jetbrains.com/kotlin/feed/";
 /// The feed only ever shows the last ten releases, so nothing older can return.
 const SEEN_CAP: usize = 50;
 
-/// Longest rate limit the bot will sit out inside a tick. A cron invocation may
-/// run for fifteen minutes of wall clock and waiting costs no CPU, so ten
-/// entries each waiting this long still finishes well inside the window.
-/// Anything longer is left for the next tick.
+/// Longest single rate limit the bot will sit out inside a tick. A cron
+/// invocation may run for fifteen minutes of wall clock and waiting costs no
+/// CPU, so the platform is not the constraint. Anything longer is left for the
+/// next tick.
 const MAX_RETRY_WAIT: u64 = 60;
+
+/// Total time one feed's pass may spend waiting. The tick repeats every five
+/// minutes, so the passes must finish well inside that even when several
+/// destinations are rate limited at once; without this bound, enough entries
+/// each waiting `MAX_RETRY_WAIT` would run into the following tick.
+const WAIT_BUDGET: u64 = 90;
 
 /// One thing worth announcing. `id` is whatever the feed uses to identify it
 /// for good: a release tag, or a blog post's `<guid>`.
@@ -296,6 +302,8 @@ pub async fn run<S: Store, T: Sender>(
         return logs;
     }
 
+    let mut wait_budget = WAIT_BUDGET;
+
     for target in targets {
         let key = format!("{}:{}", feed.key_prefix(), target.key);
         let seen = match store.get(&key).await {
@@ -340,7 +348,8 @@ pub async fn run<S: Store, T: Sender>(
             // envelope, which proves nothing was posted, so waiting and sending
             // again cannot duplicate the message.
             if let Outcome::RetryAfter(seconds) = outcome {
-                if seconds <= MAX_RETRY_WAIT {
+                if seconds <= MAX_RETRY_WAIT && seconds <= wait_budget {
+                    wait_budget -= seconds;
                     logs.push(format!(
                         "target {}: rate limited, waiting {seconds}s for {}",
                         target.key, entry.id
@@ -511,7 +520,7 @@ mod glue {
              blog      {BLOG_URL}\n\
              \x20         every post\n\n\
              Each feed has its own destination list and its own records.\n\
-             schedule  every 15 minutes\n\
+             schedule  every 5 minutes\n\
              commit    {commit}\n\
              code      https://github.com/CommanderTvis/kotlin-releases-bot/commit/{commit}\n\n\
              There is no API here. The bot runs on a cron trigger and only sends.\n"

@@ -1,6 +1,6 @@
 # kotlin-releases-bot
 
-Announces Kotlin releases and blog posts to Telegram. Every 15 minutes a
+Announces Kotlin releases and blog posts to Telegram. Every 5 minutes a
 Cloudflare Worker reads two feeds and posts anything new to that feed's own list
 of destinations — a chat, channel, group or forum topic.
 
@@ -10,7 +10,7 @@ of destinations — a chat, channel, group or forum topic.
 
 ```mermaid
 flowchart LR
-    cron([cron · 15 min]) --> worker[Worker]
+    cron([cron · 5 min]) --> worker[Worker]
     releases[("GitHub releases API")] --> worker
     blog[("blog RSS")] --> worker
     worker <--> kv[("KV · seen ids<br/>one key per feed + destination")]

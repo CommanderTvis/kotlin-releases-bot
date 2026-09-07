@@ -266,6 +266,26 @@ fn slow_mode_is_waited_out_inside_the_tick() {
 }
 
 #[test]
+fn the_waiting_budget_is_spent_once_and_not_again() {
+    // Two destinations, each rate limited for 60s. The first wait fits the
+    // budget; the second would push the pass past it, so it is refused and left
+    // for the next tick rather than running into it.
+    let h = Harness::scripted(
+        &[("seen:release:111", &["v2.4.10"]), ("seen:release:222:7", &["v2.4.10"])],
+        &[
+            ("111", &[Outcome::RetryAfter(60)]),
+            ("222", &[Outcome::RetryAfter(60), Outcome::RetryAfter(60)]),
+        ],
+        false,
+    );
+    h.run();
+    assert_eq!(*h.sender.waits.borrow(), [60], "only one wait fits the budget");
+    // The one that waited went out; the one that did not keeps its claim released.
+    assert_eq!(h.chats(), ["111"]);
+    assert_eq!(h.record("seen:release:222:7"), Some(vec!["v2.4.10".to_string()]));
+}
+
+#[test]
 fn a_rate_limit_longer_than_the_budget_is_left_for_the_next_tick() {
     let h = Harness::new(
         &[("seen:release:111", &[]), ("seen:release:222:7", &["v2.4.10", "v2.4.20-RC3"])],

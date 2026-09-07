@@ -34,7 +34,7 @@ The bot follows two feeds. They differ in shape (Atom against RSS), in what gets
 - Maven Central coordinates for `org.jetbrains.kotlin:kotlin-stdlib` — no credentials, authoritative for what a build can actually resolve, and immune to how JetBrains chooses to tag; it has no title, no notes and nothing to link to
 - The releases page on kotlinlang.org — no credentials, and it reflects what JetBrains announces to users rather than what it tags; it is HTML written for humans, so a redesign breaks the parser with no error
 
-Unauthenticated the endpoint allows sixty requests an hour per address, and Workers send from shared addresses. The bot needs four. A refusal is logged and the next tick retries, so losing that race costs fifteen minutes, not a release. A token would raise the ceiling to five thousand and stays available if sharing ever proves to be a real problem.
+Unauthenticated the endpoint allows sixty requests an hour per address, and Workers send from shared addresses. At a five-minute interval the bot uses twelve of those sixty, so it is now a fifth of a limit it shares with strangers rather than a fifteenth. A refusal is logged and the next tick retries, so losing that race costs five minutes, not a release; but this is the number to watch, and the first thing to change if 403s appear is either the interval or a token, which would raise the ceiling to five thousand.
 
 The feed is one document holding the last ten releases, roughly 50 to 150 KB with release notes inlined.
 
@@ -84,7 +84,7 @@ The orchestration reaches the outside world through two small traits, one for th
 
 ```mermaid
 flowchart TD
-    cron([Cron Trigger, every 15 minutes]) --> tick["#[event(scheduled)]<br/>returns unit, never panics"]
+    cron([Cron Trigger, every 5 minutes]) --> tick["#[event(scheduled)]<br/>returns unit, never panics"]
     tick --> feed["fetch each subscribed feed"]
     feed --> parse["parse, then filter<br/>(releases: vX.Y.Z and vX.Y.Z-RCn)"]
     parse --> loop["for each destination in TARGETS,<br/>one after another"]
@@ -115,11 +115,11 @@ flowchart TD
 - Durable Object alarm — lets the bot back off adaptively, but adds a class and a binding for a schedule that never needs to change
 
 !control select poll-interval
-= Every 15 minutes — 96 invocations a day, well under the 100,000-request Free-plan ceiling, and a release is announced within a quarter hour of appearing
-- Every 5 minutes — three times the invocations for a release cadence measured in weeks; pick it only if quarter-hour latency is complained about
+- Every 15 minutes — a third of the invocations and a third of the share of GitHub's unauthenticated rate limit; take it back if that limit starts refusing
+= Every 5 minutes — 288 invocations a day against a 100,000-request ceiling, and a release reaches its destinations within five minutes of publication rather than fifteen
 - Hourly — cheapest possible, but an hour of lag on a release announcement reads as stale
 
-A Free-plan cron invocation gets 10 ms of CPU, and every Worker has one second to start. Those are the two limits the language choice trades between: WASM leaves far more room under the CPU cap than a JavaScript parse of the same feed, and spends some of the startup budget instantiating the module. The feed is small and the binary is one crate deep, so both stay comfortable, but the startup side is the one to watch if dependencies pile up.
+A Free-plan cron invocation gets 10 ms of CPU, may run for fifteen minutes of wall clock, and every Worker has one second to start. Those are the two limits the language choice trades between: WASM leaves far more room under the CPU cap than a JavaScript parse of the same feed, and spends some of the startup budget instantiating the module. The feed is small and the binary is one crate deep, so both stay comfortable, but the startup side is the one to watch if dependencies pile up.
 
 The Free plan allows 50 subrequests per invocation. A normal tick makes one, the feed fetch. A tick with new releases makes one plus the number of sends, which is entries times destinations in the worst case. Two new entries across ten destinations is 21 subrequests. The design assumes the operator stays under roughly a dozen destinations; past that a tick during a release burst would need to spill the remainder to the next tick.
 
@@ -128,7 +128,7 @@ The Free plan allows 50 subrequests per invocation. A normal tick makes one, the
 The bot needs to remember what each destination has already received. Everything else is stateless.
 
 !control select state-store
-= Workers KV — one small JSON array per destination; the Free plan gives 100,000 reads and 1,000 writes a day, and a dozen destinations polled every fifteen minutes is about 1,200 reads a day and a handful of writes a month
+= Workers KV — one small JSON array per feed and destination; the Free plan gives 100,000 reads and 1,000 writes a day, and four records polled every five minutes is about 1,200 reads a day and a handful of writes a month
 - D1 — a real table is nicer to query by hand and would make per-destination history trivial, but a SQL schema and migrations for a few arrays of strings is ceremony
 - Durable Object storage — strongly consistent and serialized, which would also close the window where two overlapping invocations both read a stale record; the fifteen-minute spacing against a sub-second tick barely opens it
 - No state, compare `updated` against the last tick — zero storage, but a missed or delayed tick silently drops a release
@@ -204,19 +204,19 @@ A crash, an eviction, or a CPU limit between a successful send and the write rec
 A send whose outcome is genuinely unknown is the hard case, and it decides the whole design. The bot distinguishes two kinds of failure. Telegram's own error envelope, a body parsing as `{"ok": false, ...}`, proves the message was never posted, so the claim is given back and the next tick retries. Anything else, a dropped connection, a timeout, a gateway error page, means the send may have landed with only the acknowledgement lost. The claim stands and the release is never sent to that destination again.
 
 !control select target-failure-handling
-= Skip the rest of that destination's queue for this tick — the other destinations are unaffected, and a transient problem clears itself within fifteen minutes
-- Retry every failure inside the tick with backoff — would also recover from a blip a quarter hour sooner, but an ambiguous outcome must never be retried, so this would trade the duplicate guarantee for latency
+= Skip the rest of that destination's queue for this tick — the other destinations are unaffected, and a transient problem clears itself within five minutes
+- Retry every failure inside the tick with backoff — would recover from a blip a few minutes sooner, but an ambiguous outcome must never be retried, so this would trade the duplicate guarantee for latency
 - Drop a destination automatically after a 403 — stops a dead chat being polled forever, but the bot cannot write to `wrangler.toml`, so the removal would live in state the operator cannot see
 
 A rate limit is the exception, because it is not a failure. Telegram slow mode is a standing setting in some groups: the Kotlin Community forum holds it at ten seconds, so two releases in one tick are guaranteed to trip it. Treating that as a failed destination would deliver one release per tick and stretch a pair of announcements across half an hour.
 
 !control select rate-limit-handling
 = Wait out `retry_after` and send again, for hints up to a minute — a 429 carries Telegram's envelope and so proves non-delivery, which makes sending again safe; a cron tick may use fifteen minutes of wall clock and waiting spends none of the 10 ms CPU budget
-- Treat a rate limit like any other refusal — no waiting code at all, but a group with permanent slow mode then receives at most one release per fifteen minutes
+- Treat a rate limit like any other refusal — no waiting code at all, but a group with permanent slow mode then receives at most one release per tick
 - Space every send by a fixed delay — never trips the limit in the first place, but pays the delay on every tick for a limit most destinations do not have
 - Wait however long Telegram asks — handles an hour-long slow mode too, but a tick would sit idle long enough to collide with the next one
 
-The wait is bounded at sixty seconds per release. A longer hint leaves the claim released and the release for the next tick, which is the ordinary refusal path.
+The wait is bounded twice: sixty seconds for any single hint, and ninety seconds in total for one feed's pass. The second bound exists because the tick repeats every five minutes — without it, enough rate-limited entries would run one pass into the next. Either bound being hit leaves the claim released and the entry for the next tick, which is the ordinary refusal path.
 
 A skipped release is logged with the destination and the tag and the word `SKIPPED`, which is the operator's signal that a message needs sending by hand. Recovering one is an edit to that destination's record:
 
@@ -276,7 +276,7 @@ wrangler deploy
 
 ## Decisions
 
-Polling replaces webhooks because the bot has no rights on the upstream repository. Fifteen minutes is the interval that keeps invocations far under the Free-plan ceiling while making the announcement feel timely.
+Polling replaces webhooks because the bot has no rights on the upstream repository. Five minutes is the interval: invocations stay far under the Free-plan ceiling, and the binding constraint is not Cloudflare but the share it takes of GitHub's unauthenticated per-address rate limit.
 
 Filtering is by tag shape rather than by GitHub's `prerelease` flag because the Atom feed does not include that flag and the tag convention is stable and documented by usage.
 
