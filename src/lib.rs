@@ -12,7 +12,12 @@
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
-pub const RELEASES_URL: &str = "https://github.com/JetBrains/kotlin/releases.atom";
+/// The REST list, not `releases.atom`. The Atom feed is ordered by tag creation
+/// and mixes in bare tags, so TeamCity's constant `build-*` tags bury a real
+/// release long before it is published. This endpoint returns only actual
+/// releases, newest published first.
+pub const RELEASES_URL: &str =
+    "https://api.github.com/repos/JetBrains/kotlin/releases?per_page=10";
 pub const BLOG_URL: &str = "https://blog.jetbrains.com/kotlin/feed/";
 
 /// The feed only ever shows the last ten releases, so nothing older can return.
@@ -98,62 +103,26 @@ fn entity(reference: quick_xml::events::BytesRef) -> String {
     .to_string()
 }
 
-/// GitHub's releases feed: Atom `<entry>`, link as an attribute, id taken from
-/// the last path segment of that link.
-pub fn parse_atom(xml: &str) -> Vec<Entry> {
-    let mut reader = Reader::from_str(xml);
+/// GitHub's release list. Only the three fields used are declared, so the
+/// release bodies and asset lists — most of the payload — are walked but never
+/// allocated, which keeps the parse well inside the CPU budget.
+#[derive(serde::Deserialize)]
+struct ApiRelease {
+    tag_name: String,
+    name: Option<String>,
+    html_url: String,
+}
 
-    let mut entries = Vec::new();
-    let mut in_entry = false;
-    let mut in_title = false;
-    let mut link: Option<String> = None;
-    let mut title = String::new();
-
-    loop {
-        match reader.read_event() {
-            Ok(Event::Eof) | Err(_) => break,
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.name().as_ref() {
-                "entry" => {
-                    in_entry = true;
-                    link = None;
-                    title.clear();
-                }
-                // The feed carries its own <link> elements too, hence in_entry.
-                "link" if in_entry && link.is_none() => {
-                    link = e
-                        .attributes()
-                        .flatten()
-                        .find(|a| a.key.as_ref() == "href")
-                        .and_then(|a| a.normalized_value(quick_xml::XmlVersion::Explicit1_0).ok())
-                        .map(|href| href.into_owned());
-                }
-                "title" if in_entry => in_title = true,
-                _ => {}
-            },
-            Ok(Event::Text(t)) if in_title => title.push_str(&t.xml10_content()),
-            // `&amp;` and friends arrive as their own event, not as text.
-            Ok(Event::GeneralRef(r)) if in_title => title.push_str(&entity(r)),
-            Ok(Event::End(e)) => match e.name().as_ref() {
-                "title" => in_title = false,
-                "entry" => {
-                    if let Some(link) = link.take() {
-                        let title = title.trim();
-                        if !title.is_empty() {
-                            entries.push(Entry {
-                                id: link.rsplit('/').next().unwrap_or_default().to_string(),
-                                title: title.to_string(),
-                                link,
-                            });
-                        }
-                    }
-                    in_entry = false;
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-    entries
+pub fn parse_releases(json: &str) -> Vec<Entry> {
+    serde_json::from_str::<Vec<ApiRelease>>(json)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|release| Entry {
+            title: release.name.filter(|n| !n.is_empty()).unwrap_or_else(|| release.tag_name.clone()),
+            id: release.tag_name,
+            link: release.html_url,
+        })
+        .collect()
 }
 
 /// The blog feed: RSS `<item>`, link as element text, id taken from `<guid>`,
@@ -320,7 +289,7 @@ pub async fn run<S: Store, T: Sender>(
     let mut logs = Vec::new();
     let entries: Vec<Entry> = match feed {
         // Only the releases feed is filtered; every blog post is worth sending.
-        Feed::Releases => parse_atom(feed_xml).into_iter().filter(|e| is_release(&e.id)).collect(),
+        Feed::Releases => parse_releases(feed_xml).into_iter().filter(|e| is_release(&e.id)).collect(),
         Feed::Blog => parse_rss(feed_xml),
     };
     if entries.is_empty() {
@@ -483,7 +452,9 @@ mod glue {
 
     async fn fetch_feed(url: &str) -> Result<String> {
         let headers = Headers::new();
+        // GitHub's API rejects requests without a user agent.
         headers.set("user-agent", "kotlin-releases-bot")?;
+        headers.set("accept", "application/vnd.github+json")?;
         let request = Request::new_with_init(url, RequestInit::new().with_headers(headers))?;
         let mut response = Fetch::Request(request).send().await?;
         if !(200..300).contains(&response.status_code()) {
@@ -535,7 +506,7 @@ mod glue {
         Response::ok(format!(
             "kotlin-releases-bot\n\n\
              Announces Kotlin releases and blog posts to Telegram.\n\n\
-             releases  {RELEASES_URL}\n\
+             releases  github api, newest published first\n\
              \x20         keeps vX.Y.Z and vX.Y.Z-RCn, drops betas and build-*-dev-*\n\
              blog      {BLOG_URL}\n\
              \x20         every post\n\n\

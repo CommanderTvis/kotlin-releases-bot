@@ -13,11 +13,13 @@ It is for a single operator who maintains one bot and a set of destinations they
 
 ## What it does
 
-Every tick the bot fetches `https://github.com/JetBrains/kotlin/releases.atom`, extracts the entries, keeps those whose tag names a stable release or a release candidate, and then, for each destination independently, sends the entries that destination has not received yet and records what it accepted.
+Every tick the bot fetches each subscribed feed, extracts its entries, keeps the ones that feed cares about, and then, for each destination independently, sends the entries that destination has not received yet and records what it accepted.
 
 The feed has no push counterpart the bot can subscribe to without write access to the JetBrains repository, so polling is the only way in.
 
-Every candidate source has to be readable without credentials. A source needing one would mean another thing to rotate and another way for the bot to go quiet. That rules out the GitHub REST API, which carries the `prerelease` flag the tag filter has to infer, but allows only sixty unauthenticated requests an hour per address and Workers send from shared addresses.
+Every candidate source has to be readable without credentials. A source needing one would mean another thing to rotate and another way for the bot to go quiet.
+
+`releases.atom` was the original choice and it does not work. It is ordered by *tag creation*, and it lists bare tags alongside real releases. JetBrains creates a release tag about a week before publishing the release, while TeamCity pushes `build-*` tags continuously — ten entries covered barely three hours on the day this was found. So `v2.4.20`, tagged on 31 August and published on 7 September, was never anywhere near the visible window. No polling interval could have caught it.
 
 The bot follows two feeds. They differ in shape (Atom against RSS), in what gets filtered (release tags against nothing at all), and in who wants them, so each keeps its own destination list and its own delivery records.
 
@@ -27,9 +29,12 @@ The bot follows two feeds. They differ in shape (Atom against RSS), in what gets
 - One list plus a per-destination filter — the most expressive, and the most configuration to get wrong for two feeds and a handful of chats
 
 !control select data-source
-= GitHub releases Atom feed — no credentials, and unlike the REST API it is not metered per address, so it cannot be starved by other Workers sharing an egress address; one small document carries the tag, the title and the link
+= GitHub REST `/repos/JetBrains/kotlin/releases` — needs no credentials, returns only real releases rather than every tag, and orders them by publication, which is the event being announced
+- GitHub releases Atom feed — a smaller document and unmetered, but ordered by tag creation and padded with bare tags, so a real release can be invisible on the day it ships
 - Maven Central coordinates for `org.jetbrains.kotlin:kotlin-stdlib` — no credentials, authoritative for what a build can actually resolve, and immune to how JetBrains chooses to tag; it has no title, no notes and nothing to link to
 - The releases page on kotlinlang.org — no credentials, and it reflects what JetBrains announces to users rather than what it tags; it is HTML written for humans, so a redesign breaks the parser with no error
+
+Unauthenticated the endpoint allows sixty requests an hour per address, and Workers send from shared addresses. The bot needs four. A refusal is logged and the next tick retries, so losing that race costs fifteen minutes, not a release. A token would raise the ceiling to five thousand and stays available if sharing ever proves to be a real problem.
 
 The feed is one document holding the last ten releases, roughly 50 to 150 KB with release notes inlined.
 
@@ -40,9 +45,9 @@ The blog feed is WordPress RSS at `https://blog.jetbrains.com/kotlin/feed/`, abo
 - The post link — human-readable in the record and one field fewer to read, but a slug edit would look like a new post
 - A hash of the title and date — independent of the feed's own identifiers, and unreadable when an operator has to inspect a record by hand
 
-The filter is by tag name, since the Atom feed does not carry GitHub's `prerelease` flag. Two tag conventions live in this repository. Real releases are tagged `v2.4.10` for a final, `v2.4.20-RC` and `v2.4.20-RC3` for candidates, and `v2.4.20-Beta1` for betas. Everything TeamCity labels is tagged `build-`, as in `build-2.5.0-dev-6883` and `build-2.4.20-377`. The filter is therefore an allow-list, `/^v\d+\.\d+\.\d+(-RC\d*)?$/`, which admits finals and candidates and rejects both betas and every shape of build tag.
+The filter is still by tag name. The endpoint's `prerelease` flag is true for candidates and betas alike, and the bot wants candidates but not betas, so the flag cannot make that distinction on its own. Releases are tagged `v2.4.10` for a final, `v2.4.20-RC` and `v2.4.20-RC3` for candidates, and `v2.4.20-Beta1` for betas; the filter is the allow-list `/^v\d+\.\d+\.\d+(-RC\d*)?$/`.
 
-The build tags dominate the feed. At the time of writing all ten entries the feed carries are dev builds spanning about seventeen hours, so the normal outcome of a tick is that nothing matches the filter and no destination is even read. Seventeen hours of feed history against a fifteen-minute poll leaves a release visible for dozens of ticks, so the bot has a wide margin against a missed or delayed tick.
+Ten releases is roughly three months of history, so the bot has a wide margin against a missed or delayed tick.
 
 !control multi release-kinds
 [x] Final releases (`vX.Y.Z`) — the reason the bot exists
@@ -80,8 +85,8 @@ The orchestration reaches the outside world through two small traits, one for th
 ```mermaid
 flowchart TD
     cron([Cron Trigger, every 15 minutes]) --> tick["#[event(scheduled)]<br/>returns unit, never panics"]
-    tick --> feed["fetch releases.atom"]
-    feed --> parse["parse, then keep only<br/>vX.Y.Z and vX.Y.Z-RCn"]
+    tick --> feed["fetch each subscribed feed"]
+    feed --> parse["parse, then filter<br/>(releases: vX.Y.Z and vX.Y.Z-RCn)"]
     parse --> loop["for each destination in TARGETS,<br/>one after another"]
     loop --> read
 
@@ -141,14 +146,21 @@ On a destination's first tick its key is absent. The bot seeds it with every mat
 
 The parser choice is a Rust one now. `fast-xml-parser` is a JavaScript library and cannot be called from a WASM Worker, so the equivalent decision is between crates.
 
+The blog feed is XML and the release list is JSON, so there are two parsers.
+
+!control select release-parser
+= `serde_json` into a typed struct — release bodies and asset lists are most of the payload, and a typed target walks past them without allocating; the full 668 KB page parses in 0.4 ms natively, far inside the 10 ms a Free-plan cron invocation gets
+- `serde_json::Value` — no struct to declare, but it materialises every release body and asset as owned data, which is most of the payload and none of it read
+- Hand-rolled scanning for the three fields — keeps serde derive out of the tree, but hand-parsing JSON strings and escapes is exactly the work a parser exists to do
+
 !control select feed-parser
-= quick-xml — a real XML parser, so entity decoding, attribute order, self-closing tags and a feed carrying a single entry are its problem rather than the bot's; it is a pull parser that pulls in nothing else, which keeps the WASM module small enough to instantiate well inside the startup budget
+= quick-xml — a real XML parser, so entity decoding, attribute order, self-closing tags and CDATA post bodies are its problem rather than the bot's; it is a pull parser that pulls in nothing else, which keeps the WASM module small enough to instantiate well inside the startup budget
 - roxmltree — parses the whole document into a borrowed tree, which reads more plainly for pulling three fields out of each entry, at the cost of holding the parsed feed in memory at once
 - Hand-rolled scanning over `<entry>` blocks — no dependency and the smallest binary, but entity decoding and a single-entry feed become the bot's problem; take it back only if the crate ever has to go
 
-From each entry the bot takes the tag (the last path segment of the alternate link, `https://github.com/JetBrains/kotlin/releases/tag/v2.4.20-RC3`), the title, and the link itself. The title is GitHub's release name, `Kotlin 2.4.20-RC3`, which reads better than the tag and is what the message shows. The parser decodes XML entities, and the text is re-escaped for Telegram on the way out. The `<content>` block is release notes as escaped HTML; it is not used.
+From each release the bot takes `tag_name` as the id, `name` as the title (falling back to the tag when a release has no name), and `html_url` as the link. Everything else, release notes included, is walked past.
 
-Two parsing details carry weight. Text is taken as text, so a title that happens to look numeric is never coerced to a number. Entries are collected into a vector however many there are, so a feed holding a single release yields one release rather than none.
+In the blog parser, text is taken as text, so a title that happens to look numeric is never coerced to a number.
 
 The feed is fetched once per tick and the parsed result is reused for every destination.
 
@@ -314,7 +326,7 @@ Cloudflare assigns a `workers.dev` URL whether or not the Worker wants one, and 
 - Message text sent to Telegram is HTML-escaped before interpolation.
 - The parser and the `TARGETS` parser are tested against real inputs, and a change in GitHub's feed shape fails a test rather than silently posting nothing.
 - The store and the sender are reachable behind traits, so the claim-before-send ordering is asserted by a test rather than trusted.
-- A feed carrying exactly one entry parses as one release, not as none.
+- A malformed or empty release list yields no entries rather than a panic, since a panic is the one failure a tick cannot turn into a log line.
 
 ## Out of scope
 
@@ -327,6 +339,6 @@ Cloudflare assigns a `workers.dev` URL whether or not the Worker wants one, and 
 - Watching other repositories. The source is a decision in this document, not a runtime configuration.
 - Release notes in the message. The link and Telegram's preview card carry them.
 - Spilling a large fan-out across ticks. The design assumes a destination count in the low dozens.
-- Any data source needing credentials, including the authenticated GitHub REST API. Reading the feed stays unauthenticated.
+- Any data source needing credentials. The release list is read unauthenticated, accepting its shared per-address rate limit.
 - Any test that runs the deployed WebAssembly. Native `cargo test` covers the logic; `wrangler dev` is the only check that the real module loads.
 - Metrics, dashboards, or alerting. The Worker log in the Cloudflare dashboard is the observability.

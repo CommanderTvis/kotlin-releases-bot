@@ -4,14 +4,14 @@ Announces Kotlin releases and blog posts to Telegram. Every 15 minutes a
 Cloudflare Worker reads two feeds and posts anything new to that feed's own list
 of destinations — a chat, channel, group or forum topic.
 
-- [Releases](https://github.com/JetBrains/kotlin/releases.atom): keeps tags
-  matching `vX.Y.Z` and `vX.Y.Z-RCn`, drops betas and `build-*-dev-*`.
+- [Releases](https://api.github.com/repos/JetBrains/kotlin/releases): keeps tags
+  matching `vX.Y.Z` and `vX.Y.Z-RCn`, drops betas.
 - [Blog](https://blog.jetbrains.com/kotlin/feed/): every new post.
 
 ```mermaid
 flowchart LR
     cron([cron · 15 min]) --> worker[Worker]
-    releases[("releases.atom")] --> worker
+    releases[("GitHub releases API")] --> worker
     blog[("blog RSS")] --> worker
     worker <--> kv[("KV · seen ids<br/>one key per feed + destination")]
     worker --> tg[["Telegram sendMessage"]]

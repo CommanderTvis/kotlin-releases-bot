@@ -5,8 +5,8 @@ use std::rc::Rc;
 use kotlin_releases_bot::*;
 use pollster::block_on;
 
-const DEV_ONLY: &str = include_str!("releases.atom");
-const MIXED: &str = include_str!("releases-mixed.atom");
+const RELEASES: &str = include_str!("releases.json");
+const MIXED: &str = include_str!("releases-two.json");
 const BLOG: &str = include_str!("blog.xml");
 
 type Log = Rc<RefCell<Vec<String>>>;
@@ -138,39 +138,38 @@ impl Harness {
 }
 
 #[test]
-fn parses_the_live_feed_which_is_nothing_but_dev_builds() {
-    let releases = parse_atom(DEV_ONLY);
+fn the_api_list_holds_real_releases_newest_published_first() {
+    let releases = parse_releases(RELEASES);
     assert_eq!(releases.len(), 10);
-    assert_eq!(releases[0].id, "build-2.5.0-dev-6883");
-    assert!(releases.iter().all(|r| !is_release(&r.id)));
+    // The reason this endpoint replaced releases.atom: no bare build tags, and
+    // the newest published release is first even though its tag is older.
+    assert!(releases.iter().all(|r| !r.id.contains("build") && !r.id.contains("dev")));
+    assert_eq!(releases[0].id, "v2.4.20");
+    assert_eq!(releases[0].title, "Kotlin 2.4.20");
+    assert_eq!(releases[0].link, "https://github.com/JetBrains/kotlin/releases/tag/v2.4.20");
 }
 
 #[test]
-fn keeps_finals_and_candidates_drops_betas_and_dev_builds() {
-    let kept: Vec<Entry> = parse_atom(MIXED).into_iter().filter(|r| is_release(&r.id)).collect();
+fn a_malformed_or_empty_list_yields_nothing_rather_than_panicking() {
+    assert!(parse_releases("[]").is_empty());
+    assert!(parse_releases("not json").is_empty());
+    assert!(parse_releases("{}").is_empty());
+}
+
+#[test]
+fn keeps_finals_and_candidates_drops_betas() {
+    let kept: Vec<Entry> = parse_releases(RELEASES).into_iter().filter(|r| is_release(&r.id)).collect();
     let tags: Vec<&str> = kept.iter().map(|r| r.id.as_str()).collect();
-    assert_eq!(tags, ["v2.4.20-RC3", "v2.4.10"]);
-    assert_eq!(kept[0].title, "Kotlin 2.4.20-RC3");
-    assert_eq!(kept[0].link, "https://github.com/JetBrains/kotlin/releases/tag/v2.4.20-RC3");
-}
-
-#[test]
-fn a_feed_holding_a_single_entry_parses_as_one_release() {
-    let start = MIXED.find("<entry>").unwrap();
-    let end = MIXED.find("</entry>").unwrap() + "</entry>".len();
-    let one = format!("{}{}</feed>", &MIXED[..start], &MIXED[start..end]);
-    assert_eq!(parse_atom(&one).len(), 1);
-}
-
-#[test]
-fn entity_encoded_titles_survive_parsing_and_are_escaped_again() {
-    let feed = MIXED.replace(
-        "<title>Kotlin 2.4.10</title>",
-        "<title>Kotlin 2.4.10 &amp; friends</title>",
+    assert_eq!(
+        tags,
+        ["v2.4.20", "v2.4.20-RC3", "v2.4.20-RC2", "v2.4.20-RC", "v2.4.10", "v2.4.10-RC2", "v2.4.10-RC", "v2.4.0"]
     );
-    let release = parse_atom(&feed).into_iter().find(|r| r.id == "v2.4.10").unwrap();
-    assert_eq!(release.title, "Kotlin 2.4.10 & friends");
-    assert!(format_message(Feed::Releases, &release).contains("Kotlin 2.4.10 &amp; friends"));
+    assert!(!tags.iter().any(|t| t.contains("Beta")));
+
+    // The orchestration fixture keeps exactly two, with a beta between them.
+    let two: Vec<Entry> = parse_releases(MIXED).into_iter().filter(|r| is_release(&r.id)).collect();
+    assert_eq!(two.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["v2.4.20-RC3", "v2.4.10"]);
+    assert_eq!(two[0].title, "Kotlin 2.4.20-RC3");
 }
 
 #[test]
